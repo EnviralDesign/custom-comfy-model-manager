@@ -343,7 +343,8 @@ const Sync = {
         for (const folderName of folderNames) {
             const folder = node.children[folderName];
             const folderPath = path ? `${path}/${folderName}` : folderName;
-            const isExpanded = this.expandedFolders.has(folderPath);
+            // Force expand folders if searching so results are visible
+            const isExpanded = filter ? true : this.expandedFolders.has(folderPath);
 
             // Count items in folder (for display)
             const itemCount = this.countItems(folder);
