@@ -25,11 +25,11 @@ A Windows localhost tool for managing ComfyUI models across Local (fast SSD) and
 
 3. **Run the server:**
    ```
-   uv run uvicorn app.main:app --reload --host 127.0.0.1 --port 8420
+   uv run uvicorn app.main:app --reload --host 0.0.0.0 --port 8420
    ```
 
 4. **Open browser:**
-   http://127.0.0.1:8420
+   http://localhost:8420
 
 ## Tech Stack
 

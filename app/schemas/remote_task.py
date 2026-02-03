@@ -6,7 +6,7 @@ from uuid import uuid4, UUID
 from datetime import datetime
 
 TaskStatus = Literal["pending", "running", "completed", "failed", "cancelled"]
-TaskType = Literal["COMFY_GIT_CLONE", "ASSET_DOWNLOAD"]
+TaskType = Literal["COMFY_GIT_CLONE", "CREATE_VENV", "ASSET_DOWNLOAD"]
 
 class RemoteTaskBase(BaseModel):
     type: TaskType

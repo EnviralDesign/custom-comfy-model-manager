@@ -27,7 +27,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 # --- CONFIGURATION (Paste from UI) ---
-BASE_URL = "http://127.0.0.1:8420"  # Set to your home app URL
+BASE_URL = "https://dl.enviral-design.com"  # Set to your home app URL
 API_KEY = "PASTE_KEY_HERE"          # Set to your session key
 remote_root_dir = "~/comfy_remote"  # Where to install things
 
@@ -39,8 +39,8 @@ STALL_TIMEOUT = 45
 # --- SETUP ---
 REMOTE_ROOT = Path(os.path.expanduser(remote_root_dir)).resolve()
 COMFY_DIR = REMOTE_ROOT / "ComfyUI"
-MODELS_DIR = REMOTE_ROOT / "models"
-LOGS_DIR = REMOTE_ROOT / "logs"
+# We will download directly into ComfyUI/models once cloned
+MODELS_DIR = COMFY_DIR / "models" 
 
 # --- IMPORTS ---
 import requests
@@ -57,8 +57,8 @@ def log(msg, error=False):
     print(f"[{ts}] {prefix} {msg}")
 
 def ensure_dirs():
-    for d in [REMOTE_ROOT, MODELS_DIR, LOGS_DIR]:
-        d.mkdir(parents=True, exist_ok=True)
+    # Only ensure root exists; ComfyUI dir is created by git clone
+    REMOTE_ROOT.mkdir(parents=True, exist_ok=True)
 
 # --- API WRAPPERS ---
 
@@ -133,6 +133,45 @@ def handle_git_clone(task):
             
     except Exception as e:
         log(f"Git execution error: {e}", error=True)
+        update_progress(task['id'], "failed", 0.0, str(e), error=str(e))
+
+def handle_create_venv(task):
+    update_progress(task['id'], "running", 0.0, "Creating venv with uv (Python 3.13)...")
+    
+    # We run this INSIDE the ComfyUI directory
+    if not COMFY_DIR.exists():
+        update_progress(task['id'], "failed", 0.0, "ComfyUI directory not found. Install first.")
+        return
+
+    try:
+        # Check if .venv already exists
+        venv_path = COMFY_DIR / ".venv"
+        if venv_path.exists():
+            log("Venv already exists. Skipping.")
+            update_progress(task['id'], "completed", 1.0, "Venv already exists")
+            return
+
+        cmd = ["uv", "venv", "--python", "3.13"]
+        
+        log(f"Running: {' '.join(cmd)} in {COMFY_DIR}")
+        process = subprocess.Popen(
+            cmd, 
+            cwd=str(COMFY_DIR),
+            stdout=subprocess.PIPE, 
+            stderr=subprocess.PIPE, 
+            text=True
+        )
+        stdout, stderr = process.communicate()
+        
+        if process.returncode == 0:
+            log("Venv created successfully.")
+            update_progress(task['id'], "completed", 1.0, "Venv created")
+        else:
+            log(f"Venv creation failed: {stderr}", error=True)
+            update_progress(task['id'], "failed", 0.0, "Venv creation failed", error=stderr)
+
+    except Exception as e:
+        log(f"Venv error: {e}", error=True)
         update_progress(task['id'], "failed", 0.0, str(e), error=str(e))
 
 def download_from_source(url, dest_path, task_id, existing_size=0):
@@ -248,9 +287,25 @@ def handle_download(task):
 # --- MAIN LOOP ---
 
 def main():
-    if API_KEY == "PASTE_KEY_HERE":
-        print("Please edit the script and paste your API_KEY.")
-        return
+    global API_KEY
+    
+    # Prompt for key if not baked in
+    if API_KEY == "PASTE_KEY_HERE" or not API_KEY:
+        print(f"Target: {BASE_URL}")
+        try:
+            # We use 'input' so you can see what you paste. 
+            # Use getpass.getpass() if you prefer hidden input.
+            val = input("Enter Session API Key: ").strip()
+            if not val:
+                print("No key provided. Exiting.")
+                return
+            API_KEY = val
+            
+            # Update session headers with the new key
+            session.headers.update({"Authorization": f"Bearer {API_KEY}"})
+            
+        except KeyboardInterrupt:
+            return
 
     ensure_dirs()
     register_agent()
@@ -269,6 +324,8 @@ def main():
                 
                 if task['type'] == 'COMFY_GIT_CLONE':
                     handle_git_clone(task)
+                elif task['type'] == 'CREATE_VENV':
+                    handle_create_venv(task)
                 elif task['type'] == 'ASSET_DOWNLOAD':
                     handle_download(task)
                 else:

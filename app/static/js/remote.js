@@ -19,6 +19,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
         actionsPanel: document.getElementById('actions-panel'),
         btnInstallComfy: document.getElementById('btn-install-comfy'),
+        btnCreateVenv: document.getElementById('btn-create-venv'),
         taskList: document.getElementById('remote-task-list')
     };
 
@@ -212,6 +213,10 @@ document.addEventListener('DOMContentLoaded', () => {
 
     els.btnInstallComfy.addEventListener('click', () => {
         enqueueTask('COMFY_GIT_CLONE', {}, 'Install ComfyUI');
+    });
+
+    els.btnCreateVenv.addEventListener('click', () => {
+        enqueueTask('CREATE_VENV', {}, 'Create Venv (uv 3.13)');
     });
 
     // Initial load

@@ -11,8 +11,10 @@
         .remote-layout {
             display: grid;
             grid-template-columns: 1fr 1fr;
-            gap: var(--spacing-lg);
-            padding: var(--spacing-lg);
+            gap: 2rem;
+            padding: 2rem;
+            max-width: 1600px;
+            margin: 0 auto;
             max-width: 1400px;
             margin: 0 auto;
         }
@@ -21,7 +23,7 @@
             background: var(--bg-secondary);
             border-radius: var(--radius-lg);
             border: 1px solid var(--border-color);
-            padding: var(--spacing-lg);
+            padding: 2rem;
         }
 
         .panel-header {
@@ -62,18 +64,25 @@
         .key-display {
             background: var(--bg-tertiary);
             padding: var(--spacing-md);
+            padding-right: 80px;
+            /* Make room for button */
             border-radius: var(--radius-md);
             font-family: 'JetBrains Mono', monospace;
             word-break: break-all;
             margin: var(--spacing-md) 0;
             border: 1px solid var(--border-color);
             position: relative;
+            display: flex;
+            align-items: center;
+            min-height: 3rem;
         }
 
         .blur-text {
             filter: blur(4px);
             user-select: none;
             transition: filter 0.2s;
+            display: block;
+            width: 100%;
         }
 
         .key-display:hover .blur-text {
@@ -82,16 +91,17 @@
 
         .copy-btn {
             position: absolute;
-            top: 4px;
-            right: 4px;
-            padding: 4px 8px;
+            top: 50%;
+            transform: translateY(-50%);
+            right: 8px;
+            padding: 4px 12px;
             font-size: 0.8rem;
         }
 
         .config-row {
             display: flex;
             justify-content: space-between;
-            padding: var(--spacing-sm) 0;
+            padding: 1rem 0;
             border-bottom: 1px solid var(--border-dim);
         }
 
@@ -226,13 +236,17 @@
                 <div class="panel-title">🛠️ Actions</div>
             </div>
 
-            <div class="remote-actions-grid"
-                style="display: grid; grid-template-columns: 1fr 2fr; gap: var(--spacing-lg);">
+            <div class="remote-actions-grid" style="display: grid; grid-template-columns: 280px 1fr; gap: 3rem;">
                 <!-- Action Buttons -->
                 <div class="action-buttons">
                     <h4 class="mb-4">Commands</h4>
-                    <button id="btn-install-comfy" class="btn btn-secondary w-full mb-3" style="text-align: left;">
+                    <button id="btn-install-comfy" class="btn btn-secondary w-full"
+                        style="text-align: left; margin-bottom: 1rem; padding: 1rem;">
                         📦 Install ComfyUI (Scaffold)
+                    </button>
+                    <button id="btn-create-venv" class="btn btn-secondary w-full"
+                        style="text-align: left; margin-bottom: 1rem; padding: 1rem;">
+                        🐍 Create Venv (Python 3.13)
                     </button>
                     <!-- Future: Queue Downloads -->
                 </div>

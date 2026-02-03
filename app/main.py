@@ -61,6 +61,44 @@ templates = Jinja2Templates(directory=TEMPLATES_DIR)
 
 
 # ============================================================================
+# Security Middleware (Split Horizon)
+# ============================================================================
+
+from urllib.parse import urlparse
+from fastapi.responses import PlainTextResponse
+
+@app.middleware("http")
+async def filter_external_traffic(request: Request, call_next):
+    """
+    Split Horizon Security:
+    - If request comes from the configured REMOTE_BASE_URL host (Tunnel),
+      LOCK DOWN ACCESS. Only allow /api/remote/* endpoints.
+      Block UI, Sync, Dedupe, and local management APIs.
+    - If request comes from localhost/127.0.0.1, ALLOW ALL.
+    """
+    settings = get_settings()
+    
+    # 1. Identify if this is external traffic
+    host_header = request.headers.get("host", "").split(":")[0]
+    
+    # Parse configured remote host (e.g. "comfy-remote.tunnels.com")
+    try:
+        remote_host = urlparse(settings.remote_base_url).hostname
+    except:
+        remote_host = None
+
+    # If it matches the remote tunnel...
+    if remote_host and host_header.lower() == remote_host.lower():
+        # 2. Enforce Allowlist
+        # We only allow the remote agent API.
+        if not request.url.path.startswith("/api/remote"):
+            # Start strict: 403 Forbidden for everything else
+            return PlainTextResponse("Forbidden: External access restricted to Remote Agent API only.", status_code=403)
+
+    return await call_next(request)
+
+
+# ============================================================================
 # HTML Routes (HTMX-friendly)
 # ============================================================================
 
