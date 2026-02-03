@@ -11,8 +11,19 @@ const Sync = {
 
     async init() {
         this.bindEvents();
+        await this.loadConfig();
         await this.loadQueueState();
         await this.refresh();
+    },
+
+    async loadConfig() {
+        try {
+            this.config = await App.api('GET', '/index/config');
+        } catch (err) {
+            console.error('Failed to load config:', err);
+            // Default to safe values
+            this.config = { local_allow_delete: false, lake_allow_delete: false };
+        }
     },
 
     async loadQueueState() {
@@ -307,6 +318,7 @@ const Sync = {
             html += `
                 <div class="diff-row diff-row-file ${statusClass} ${queueClass}" data-relpath="${file.relpath}" data-depth="${depth}">
                     <div class="diff-col diff-col-local">
+                        ${this.config.local_allow_delete && hasLocal && !queueInfo ? `<button class="btn-icon btn-delete" data-action="delete-file" data-side="local" data-relpath="${file.relpath}" title="Delete from Local">🗑️</button>` : ''}
                         <span class="file-size">${hasLocal ? App.formatBytes(file.local_size) : ''}</span>
                         <span class="btn-slot">
                             ${hasLocal && !hasLake && !queueInfo ? `<button class="btn-icon btn-copy" data-action="copy-to-lake" data-relpath="${file.relpath}" title="Copy to Lake →">→</button>` : ''}
@@ -325,6 +337,7 @@ const Sync = {
                             ${hasLake && !hasLocal && !queueInfo ? `<button class="btn-icon btn-copy" data-action="copy-to-local" data-relpath="${file.relpath}" title="← Copy to Local">←</button>` : ''}
                         </span>
                         <span class="file-size">${hasLake ? App.formatBytes(file.lake_size) : ''}</span>
+                        ${this.config.lake_allow_delete && hasLake && !queueInfo ? `<button class="btn-icon btn-delete" data-action="delete-file" data-side="lake" data-relpath="${file.relpath}" title="Delete from Lake">🗑️</button>` : ''}
                     </div>
                 </div>
             `;
@@ -427,6 +440,14 @@ const Sync = {
             const srcSide = target.dataset.action === 'copy-to-lake' ? 'local' : 'lake';
             const dstSide = target.dataset.action === 'copy-to-lake' ? 'lake' : 'local';
             this.enqueueCopy(srcSide, relpath, dstSide);
+            return;
+        }
+
+        // File delete buttons
+        if (target.dataset.action === 'delete-file') {
+            const relpath = target.dataset.relpath;
+            const side = target.dataset.side;
+            this.enqueueDelete(side, relpath);
             return;
         }
 
@@ -539,6 +560,33 @@ const Sync = {
             App.loadQueueTasks();
         } catch (err) {
             alert('Copy failed: ' + err.message);
+        }
+    },
+
+    async enqueueDelete(side, relpath) {
+        if (!confirm(`Are you sure you want to delete this file from ${side}?\n\n${relpath}\n\nThis cannot be undone.`)) {
+            return;
+        }
+
+        try {
+            const result = await App.api('POST', '/queue/delete', {
+                side: side,
+                relpath: relpath,
+            });
+
+            // Add to local tracking
+            this.queuedFiles.set(relpath, { status: 'pending', taskId: result.task_id });
+
+            // Visual feedback - add pending class
+            const row = document.querySelector(`[data-relpath="${CSS.escape(relpath)}"]`);
+            if (row) {
+                row.classList.add('queue-pending');
+            }
+
+            // Refresh queue panel
+            App.loadQueueTasks();
+        } catch (err) {
+            alert('Delete failed: ' + err.message);
         }
     },
 

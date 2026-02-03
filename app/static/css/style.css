@@ -215,6 +215,7 @@ a:hover {
     font-size: 32px;
     margin-bottom: 12px;
     background: linear-gradient(135deg, var(--accent), #a855f7);
+    background-clip: text;
     -webkit-background-clip: text;
     -webkit-text-fill-color: transparent;
 }
@@ -489,12 +490,48 @@ a:hover {
     color: white;
 }
 
+.btn-icon.btn-delete:hover {
+    background: var(--danger);
+    border-color: var(--danger);
+}
+
 .btn-copy {
     opacity: 0;
 }
 
 .diff-row:hover .btn-copy {
     opacity: 1;
+}
+
+/* Delete buttons */
+.btn-delete {
+    opacity: 0;
+    /* Hidden by default */
+    font-size: 14px;
+    /* Icon size */
+    transition: all 0.2s;
+}
+
+.diff-row:hover .btn-delete {
+    opacity: 0.5;
+    /* Dim on row hover */
+}
+
+.btn-delete:hover {
+    opacity: 1 !important;
+    /* Full on button hover */
+    background: var(--danger);
+    border-color: var(--danger);
+    color: white;
+}
+
+/* Position delete buttons at far edges */
+.diff-col-local .btn-delete {
+    margin-right: auto;
+}
+
+.diff-col-lake .btn-delete {
+    margin-left: auto;
 }
 
 /* Verify button */

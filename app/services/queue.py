@@ -12,7 +12,7 @@ from app.database import get_db
 
 class QueueTask(BaseModel):
     id: int
-    task_type: Literal["copy", "delete"]
+    task_type: Literal["copy", "delete", "verify"]
     status: Literal["pending", "running", "completed", "failed", "cancelled"]
     src_side: str | None
     src_relpath: str | None

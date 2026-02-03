@@ -15,6 +15,17 @@ class RefreshRequest(BaseModel):
     side: Literal["local", "lake", "both"] = "both"
 
 
+@router.get("/config")
+async def get_config():
+    """Get frontend configuration."""
+    from app.config import get_settings
+    settings = get_settings()
+    return {
+        "local_allow_delete": settings.local_allow_delete,
+        "lake_allow_delete": settings.lake_allow_delete,
+    }
+
+
 class RefreshResponse(BaseModel):
     side: str
     files_indexed: int
