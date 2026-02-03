@@ -274,12 +274,16 @@ const Sync = {
             const hasLocal = file.local_size !== null;
             const hasLake = file.lake_size !== null;
 
+            // Check if file is in queue
+            const queueInfo = this.queuedFiles.get(file.relpath);
+            const queueClass = queueInfo ? `queue-${queueInfo.status}` : '';
+
             html += `
-                <div class="diff-row diff-row-file ${statusClass}" data-relpath="${file.relpath}" data-depth="${depth}">
+                <div class="diff-row diff-row-file ${statusClass} ${queueClass}" data-relpath="${file.relpath}" data-depth="${depth}">
                     <div class="diff-col diff-col-local">
                         <span class="file-size">${hasLocal ? App.formatBytes(file.local_size) : ''}</span>
                         <span class="btn-slot">
-                            ${hasLocal && !hasLake ? `<button class="btn-icon btn-copy" data-action="copy-to-lake" data-relpath="${file.relpath}" title="Copy to Lake →">→</button>` : ''}
+                            ${hasLocal && !hasLake && !queueInfo ? `<button class="btn-icon btn-copy" data-action="copy-to-lake" data-relpath="${file.relpath}" title="Copy to Lake →">→</button>` : ''}
                         </span>
                         <span class="presence-bar ${hasLocal ? 'present' : 'absent'}"></span>
                     </div>
@@ -291,7 +295,7 @@ const Sync = {
                     <div class="diff-col diff-col-lake">
                         <span class="presence-bar ${hasLake ? 'present' : 'absent'}"></span>
                         <span class="btn-slot">
-                            ${hasLake && !hasLocal ? `<button class="btn-icon btn-copy" data-action="copy-to-local" data-relpath="${file.relpath}" title="← Copy to Local">←</button>` : ''}
+                            ${hasLake && !hasLocal && !queueInfo ? `<button class="btn-icon btn-copy" data-action="copy-to-local" data-relpath="${file.relpath}" title="← Copy to Local">←</button>` : ''}
                         </span>
                         <span class="file-size">${hasLake ? App.formatBytes(file.lake_size) : ''}</span>
                     </div>

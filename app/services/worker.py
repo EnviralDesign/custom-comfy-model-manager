@@ -158,6 +158,9 @@ class QueueWorker:
     
     async def _execute_copy(self, task: dict):
         """Execute a copy task."""
+        import blake3
+        from datetime import datetime, timezone
+        
         src_root = self._get_root(task["src_side"])
         dst_root = self._get_root(task["dst_side"])
         
@@ -175,7 +178,10 @@ class QueueWorker:
         bytes_copied = 0
         task_id = task["id"]
         
-        # Copy with progress
+        # Hash while copying
+        hasher = blake3.blake3()
+        
+        # Copy with progress and compute hash
         chunk_size = 1024 * 1024  # 1MB chunks
         
         async with aiofiles.open(src_path, 'rb') as src_file:
@@ -185,6 +191,7 @@ class QueueWorker:
                     if not chunk:
                         break
                     await dst_file.write(chunk)
+                    hasher.update(chunk)
                     bytes_copied += len(chunk)
                     
                     # Update progress in DB and broadcast
@@ -206,12 +213,37 @@ class QueueWorker:
                             "progress_pct": progress_pct,
                         })
         
+        # Compute final hash
+        file_hash = hasher.hexdigest()
+        now = datetime.now(timezone.utc).isoformat()
+        
         # Preserve file times (sync call is fine, very fast)
         import os
         src_stat = src_path.stat()
         os.utime(dst_path, (src_stat.st_atime, src_stat.st_mtime))
+        dst_stat = dst_path.stat()
         
-        print(f"Copied: {task['src_relpath']} → {task['dst_side']}")
+        # Update file_index with hash for both source and destination
+        async with get_db() as db:
+            # Update source file hash
+            await db.execute(
+                """
+                UPDATE file_index SET hash = ?, hash_computed_at = ?
+                WHERE side = ? AND relpath = ?
+                """,
+                (file_hash, now, task["src_side"], task["src_relpath"])
+            )
+            # Update destination file hash
+            await db.execute(
+                """
+                INSERT OR REPLACE INTO file_index (side, relpath, size, mtime_ns, hash, hash_computed_at, indexed_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (task["dst_side"], task["dst_relpath"], dst_stat.st_size, dst_stat.st_mtime_ns, file_hash, now, now)
+            )
+            await db.commit()
+        
+        print(f"Copied: {task['src_relpath']} → {task['dst_side']} (hash: {file_hash[:8]}...)")
     
     async def _execute_delete(self, task: dict):
         """Execute a delete task."""
