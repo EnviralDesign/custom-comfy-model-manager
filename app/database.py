@@ -82,6 +82,28 @@ CREATE TABLE IF NOT EXISTS source_urls (
 
 CREATE INDEX IF NOT EXISTS idx_source_urls_key ON source_urls(key);
 CREATE INDEX IF NOT EXISTS idx_source_urls_relpath ON source_urls(relpath) WHERE relpath IS NOT NULL;
+
+-- Bundles: named collections of model files
+CREATE TABLE IF NOT EXISTS bundles (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL UNIQUE,
+    description TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+-- Bundle assets: links bundles to files
+CREATE TABLE IF NOT EXISTS bundle_assets (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    bundle_id INTEGER NOT NULL REFERENCES bundles(id) ON DELETE CASCADE,
+    relpath TEXT NOT NULL,
+    hash TEXT,  -- optional, for verification
+    source_url_override TEXT,  -- optional, override global source_url
+    UNIQUE(bundle_id, relpath)
+);
+
+CREATE INDEX IF NOT EXISTS idx_bundle_assets_bundle ON bundle_assets(bundle_id);
+CREATE INDEX IF NOT EXISTS idx_bundle_assets_relpath ON bundle_assets(relpath);
 """
 
 

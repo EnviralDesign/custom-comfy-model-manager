@@ -1,0 +1,208 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Bundles - ComfyUI Model Manager</title>
+    <link rel="stylesheet" href="/static/css/style.css">
+    <style>
+        .bundles-layout {
+            display: grid;
+            grid-template-columns: 300px 1fr;
+            height: calc(100vh - 56px);
+            overflow: hidden;
+        }
+
+        .bundles-sidebar {
+            background: var(--bg-secondary);
+            border-right: 1px solid var(--border);
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+        }
+
+        .sidebar-header {
+            padding: 16px;
+            border-bottom: 1px solid var(--border);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .bundles-list {
+            overflow-y: auto;
+            flex: 1;
+        }
+
+        .bundle-item {
+            padding: 12px 16px;
+            border-bottom: 1px solid var(--border-light);
+            cursor: pointer;
+            transition: background 0.2s;
+        }
+
+        .bundle-item:hover {
+            background: var(--bg-hover);
+        }
+
+        .bundle-item.active {
+            background: var(--bg-tertiary);
+            border-left: 3px solid var(--accent);
+        }
+
+        .bundle-name {
+            font-weight: 500;
+            margin-bottom: 4px;
+        }
+
+        .bundle-meta {
+            font-size: 12px;
+            color: var(--text-muted);
+            display: flex;
+            justify-content: space-between;
+        }
+
+        .bundle-detail {
+            padding: 24px;
+            overflow-y: auto;
+            display: flex;
+            flex-direction: column;
+            gap: 24px;
+        }
+
+        .bundle-header-detail {
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-start;
+            border-bottom: 1px solid var(--border);
+            padding-bottom: 24px;
+        }
+
+        .bundle-assets {
+            flex: 1;
+        }
+
+        .asset-table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+
+        .asset-table th,
+        .asset-table td {
+            text-align: left;
+            padding: 12px;
+            border-bottom: 1px solid var(--border);
+        }
+
+        .asset-table th {
+            color: var(--text-muted);
+            font-weight: 500;
+            font-size: 12px;
+        }
+
+        .asset-table tr:hover {
+            background: var(--bg-tertiary);
+        }
+
+        .empty-state {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            height: 100%;
+            color: var(--text-muted);
+            text-align: center;
+        }
+
+        .modal-input {
+            width: 100%;
+            padding: 8px 12px;
+            background: var(--bg-primary);
+            border: 1px solid var(--border);
+            border-radius: var(--radius-sm);
+            color: var(--text-primary);
+            margin-top: 8px;
+            margin-bottom: 16px;
+        }
+    </style>
+</head>
+
+<body>
+    <nav class="top-bar">
+        <div class="logo">
+            <span class="logo-icon">⚡</span>
+            <span class="logo-text">ComfyUI Model Manager</span>
+        </div>
+        <div class="nav-links">
+            <a href="/sync" class="nav-link">Sync</a>
+            <a href="/bundles" class="nav-link active">Bundles</a>
+            <a href="/dedupe" class="nav-link">Dedupe</a>
+            <a href="/remote" class="nav-link">Remote</a>
+        </div>
+        <div class="nav-actions">
+            <!-- Reuse queue widget if possible, but keep simple for now -->
+        </div>
+    </nav>
+
+    <div class="bundles-layout">
+        <!-- Sidebar: List of Bundles -->
+        <aside class="bundles-sidebar">
+            <div class="sidebar-header">
+                <h3>Bundles</h3>
+                <button id="create-bundle-btn" class="btn btn-primary btn-small">+ New</button>
+            </div>
+            <div id="bundles-list" class="bundles-list">
+                <!-- Bundles injected here -->
+                <div class="loading" style="padding: 16px;">Loading...</div>
+            </div>
+        </aside>
+
+        <!-- Main: Bundle Detail -->
+        <main id="bundle-detail" class="bundle-detail">
+            <div class="empty-state">
+                <span style="font-size: 48px; margin-bottom: 16px;">📦</span>
+                <h3>Select a bundle to view details</h3>
+            </div>
+        </main>
+    </div>
+
+    <!-- Queue Panel (reuse existing structure) -->
+    <div class="queue-panel" id="queue-panel">
+        <div class="queue-header">
+            <h3>📋 Task Queue</h3>
+            <div class="queue-controls">
+                <button class="btn btn-small" id="pause-queue">⏸️</button>
+                <button class="btn btn-small" id="resume-queue">▶️</button>
+            </div>
+        </div>
+        <div class="queue-list" id="queue-list"></div>
+    </div>
+
+    <!-- Create/Edit Bundle Modal -->
+    <div id="bundle-modal" class="modal-overlay" style="display: none; visibility: visible;">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3 id="modal-title">Create Bundle</h3>
+                <button class="modal-close" onclick="Bundles.closeModal()">×</button>
+            </div>
+            <div class="modal-body">
+                <label for="bundle-name">Name</label>
+                <input type="text" id="bundle-name" class="modal-input" placeholder="e.g. SDXL Essentials">
+
+                <label for="bundle-desc">Description</label>
+                <textarea id="bundle-desc" class="modal-input" style="height: 80px; resize: none;"
+                    placeholder="Optional description..."></textarea>
+            </div>
+            <div class="modal-footer">
+                <button class="btn" onclick="Bundles.closeModal()">Cancel</button>
+                <button class="btn btn-primary" id="modal-save-btn">Save</button>
+            </div>
+        </div>
+    </div>
+
+    <script src="/static/js/app.js"></script>
+    <script src="/static/js/bundles.js"></script>
+</body>
+
+</html>

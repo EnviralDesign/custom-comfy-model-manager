@@ -133,6 +133,12 @@ async def remote_page(request: Request):
     return templates.TemplateResponse("remote.html", {"request": request})
 
 
+@app.get("/bundles", response_class=HTMLResponse)
+async def bundles_page(request: Request):
+    """Bundles management view."""
+    return templates.TemplateResponse("bundles.html", {"request": request})
+
+
 # ============================================================================
 # API Routes (imported from routers)
 # ============================================================================
@@ -141,11 +147,13 @@ from app.routers import index as index_router
 from app.routers import queue as queue_router
 from app.routers import dedupe as dedupe_router
 from app.routers import sources as sources_router
+from app.routers import bundles as bundles_router
 
 app.include_router(index_router.router, prefix="/api/index", tags=["index"])
 app.include_router(queue_router.router, prefix="/api/queue", tags=["queue"])
 app.include_router(dedupe_router.router, prefix="/api/dedupe", tags=["dedupe"])
 app.include_router(sources_router.router, prefix="/api/index", tags=["sources"])
+app.include_router(bundles_router.router, prefix="/api", tags=["bundles"])
 
 from app.routers import remote as remote_router
 from app.routers import remote_assets
