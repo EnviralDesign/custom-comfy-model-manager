@@ -35,9 +35,15 @@ async def lifespan(app: FastAPI):
     await startup_db()
     print("✓ Database initialized")
     
+    # Start queue worker
+    from app.services.worker import get_worker
+    worker = get_worker()
+    await worker.start()
+    
     yield
     
     # Shutdown
+    await worker.stop()
     print("Shutting down...")
 
 

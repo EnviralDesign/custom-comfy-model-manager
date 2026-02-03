@@ -138,13 +138,17 @@ const Sync = {
                 continue;
             }
 
+            // Determine if sync buttons should show
+            const showSyncToLake = folderStatus.hasOnlyLocal;
+            const showSyncToLocal = folderStatus.hasOnlyLake;
+
             html += `
                 <div class="diff-row diff-row-folder" data-path="${folderPath}" data-depth="${depth}">
                     <div class="diff-col diff-col-local">
-                        <span class="folder-status ${folderStatus.local}">${folderStatus.localIcon}</span>
-                        ${folderStatus.local === 'has-files' && folderStatus.lake === 'no-files' ?
-                    `<button class="btn-icon btn-copy" data-action="sync-folder-to-lake" data-folder="${folderPath}" title="Copy folder to Lake →">→</button>` :
-                    (folderStatus.hasOnlyLocal ? `<button class="btn-icon btn-copy" data-action="sync-folder-to-lake" data-folder="${folderPath}" title="Copy missing to Lake →">→</button>` : '')}
+                        <span class="btn-slot">
+                            ${showSyncToLake ? `<button class="btn-icon btn-copy" data-action="sync-folder-to-lake" data-folder="${folderPath}" title="Copy ${folderStatus.onlyLocalCount || ''} to Lake →">→</button>` : ''}
+                        </span>
+                        <span class="presence-bar ${folderStatus.local === 'has-files' ? 'present' : 'absent'}"></span>
                     </div>
                     <div class="diff-col diff-col-path">
                         <span class="tree-indent" style="width: ${depth * 20}px"></span>
@@ -156,10 +160,10 @@ const Sync = {
                         <span class="folder-count">(${itemCount})</span>
                     </div>
                     <div class="diff-col diff-col-lake">
-                        ${folderStatus.lake === 'has-files' && folderStatus.local === 'no-files' ?
-                    `<button class="btn-icon btn-copy" data-action="sync-folder-to-local" data-folder="${folderPath}" title="← Copy folder to Local">←</button>` :
-                    (folderStatus.hasOnlyLake ? `<button class="btn-icon btn-copy" data-action="sync-folder-to-local" data-folder="${folderPath}" title="← Copy missing to Local">←</button>` : '')}
-                        <span class="folder-status ${folderStatus.lake}">${folderStatus.lakeIcon}</span>
+                        <span class="presence-bar ${folderStatus.lake === 'has-files' ? 'present' : 'absent'}"></span>
+                        <span class="btn-slot">
+                            ${showSyncToLocal ? `<button class="btn-icon btn-copy" data-action="sync-folder-to-local" data-folder="${folderPath}" title="← Copy ${folderStatus.onlyLakeCount || ''} to Local">←</button>` : ''}
+                        </span>
                     </div>
                 </div>
             `;
@@ -179,14 +183,17 @@ const Sync = {
 
             const statusClass = this.getStatusClass(file.status);
             const statusIcon = this.getStatusIcon(file.status);
+            const hasLocal = file.local_size !== null;
+            const hasLake = file.lake_size !== null;
 
             html += `
                 <div class="diff-row diff-row-file ${statusClass}" data-relpath="${file.relpath}" data-depth="${depth}">
                     <div class="diff-col diff-col-local">
-                        ${file.local_size !== null ? `
-                            <span class="file-size">${App.formatBytes(file.local_size)}</span>
-                            <button class="btn-icon btn-copy" data-action="copy-to-lake" data-relpath="${file.relpath}" title="Copy to Lake →">→</button>
-                        ` : '<span class="missing">—</span>'}
+                        <span class="file-size">${hasLocal ? App.formatBytes(file.local_size) : ''}</span>
+                        <span class="btn-slot">
+                            ${hasLocal && !hasLake ? `<button class="btn-icon btn-copy" data-action="copy-to-lake" data-relpath="${file.relpath}" title="Copy to Lake →">→</button>` : ''}
+                        </span>
+                        <span class="presence-bar ${hasLocal ? 'present' : 'absent'}"></span>
                     </div>
                     <div class="diff-col diff-col-path">
                         <span class="tree-indent" style="width: ${depth * 20}px"></span>
@@ -194,10 +201,11 @@ const Sync = {
                         <span class="file-name" title="${file.relpath}">${file.filename}</span>
                     </div>
                     <div class="diff-col diff-col-lake">
-                        ${file.lake_size !== null ? `
-                            <button class="btn-icon btn-copy" data-action="copy-to-local" data-relpath="${file.relpath}" title="← Copy to Local">←</button>
-                            <span class="file-size">${App.formatBytes(file.lake_size)}</span>
-                        ` : '<span class="missing">—</span>'}
+                        <span class="presence-bar ${hasLake ? 'present' : 'absent'}"></span>
+                        <span class="btn-slot">
+                            ${hasLake && !hasLocal ? `<button class="btn-icon btn-copy" data-action="copy-to-local" data-relpath="${file.relpath}" title="← Copy to Local">←</button>` : ''}
+                        </span>
+                        <span class="file-size">${hasLake ? App.formatBytes(file.lake_size) : ''}</span>
                     </div>
                 </div>
             `;

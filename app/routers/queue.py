@@ -96,16 +96,16 @@ async def enqueue_delete(request: DeleteRequest):
 @router.post("/pause")
 async def pause_queue():
     """Pause queue processing."""
-    queue_service = QueueService()
-    await queue_service.pause()
+    from app.services.worker import QueueWorker
+    QueueWorker.pause()
     return {"status": "paused"}
 
 
 @router.post("/resume")
 async def resume_queue():
     """Resume queue processing."""
-    queue_service = QueueService()
-    await queue_service.resume()
+    from app.services.worker import QueueWorker
+    QueueWorker.resume()
     return {"status": "resumed"}
 
 

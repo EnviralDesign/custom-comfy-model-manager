@@ -412,20 +412,30 @@ a:hover {
     margin-left: 4px;
 }
 
-.folder-status {
-    font-size: 10px;
+/* Presence indicator bar - replaces dots */
+.presence-bar {
+    width: 4px;
+    height: 20px;
+    border-radius: 2px;
+    flex-shrink: 0;
 }
 
-.folder-status.has-files {
-    color: var(--success);
+.presence-bar.present {
+    background: var(--success);
 }
 
-.folder-status.no-files {
-    color: var(--text-muted);
+.presence-bar.absent {
+    background: var(--border);
 }
 
-.folder-children {
-    /* Nested content */
+/* Fixed-width button slot - prevents layout shift */
+.btn-slot {
+    width: 28px;
+    height: 24px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
 }
 
 /* Tree indentation */
@@ -510,8 +520,9 @@ a:hover {
     border-right: 3px solid var(--warning);
 }
 
-.diff-row-file.status-same {
-    /* Subtle indicator for matched files */
+.diff-row-file.status-same .presence-bar.present {
+    background: var(--success);
+    opacity: 0.5;
 }
 
 /* File name styling */
@@ -527,6 +538,13 @@ a:hover {
     font-size: 11px;
     color: var(--text-muted);
     font-family: var(--font-mono);
+    width: 60px;
+    text-align: right;
+    flex-shrink: 0;
+}
+
+.diff-col-lake .file-size {
+    text-align: left;
 }
 
 /* Diff status indicators */
