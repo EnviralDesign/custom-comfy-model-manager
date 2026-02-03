@@ -23,6 +23,7 @@ class DuplicateGroup(BaseModel):
     id: int
     hash: str
     files: list[DuplicateFile]
+    fast_hash: bool = False
 
 
 class DedupeService:
@@ -30,18 +31,24 @@ class DedupeService:
         settings = get_settings()
         return settings.local_models_root if side == "local" else settings.lake_models_root
     
-    async def enqueue_scan(self, side: Literal["local", "lake"]) -> int:
-        """Enqueue a dedupe scan task."""
+    async def enqueue_scan(self, side: Literal["local", "lake"], mode: Literal["full", "fast"] = "full") -> int:
+        """Enqueue a dedupe scan task.
+        
+        Args:
+            side: 'local' or 'lake'
+            mode: 'full' (hashed entire file) or 'fast' (partial hash)
+        """
         now = datetime.now(timezone.utc).isoformat()
         async with get_db() as db:
+            # We treat 'dst_side' as 'mode' for dedupe tasks to avoid schema migration
             cursor = await db.execute(
-                "INSERT INTO queue (task_type, src_side, created_at, size_bytes) VALUES ('dedupe_scan', ?, ?, 0)",
-                (side, now)
+                "INSERT INTO queue (task_type, src_side, dst_side, created_at, size_bytes) VALUES ('dedupe_scan', ?, ?, ?, 0)",
+                (side, mode, now)
             )
             await db.commit()
             return cursor.lastrowid
             
-    async def execute_scan(self, task_id: int, side: Literal["local", "lake"]) -> dict:
+    async def execute_scan(self, task_id: int, side: Literal["local", "lake"], mode: Literal["full", "fast"] = "full") -> dict:
         """Execute a dedupe scan task (called by worker)."""
         scan_id = str(uuid.uuid4())
         now = datetime.now(timezone.utc).isoformat()
@@ -64,7 +71,7 @@ class DedupeService:
                     "progress_pct": pct,
                     "bytes_transferred": current, # Using file count as bytes for simplicity
                     "total_bytes": total,
-                    "message": f"Hashing {current}/{total}: {relpath}"
+                    "message": f"Hashing ({mode}) {current}/{total}: {relpath}"
                 })
                 # Update DB
                 async with get_db() as db:
@@ -76,11 +83,11 @@ class DedupeService:
                 last_update = time.time()
 
         # Update status to counting
-        await broadcast("queue_progress", {"task_id": task_id, "progress_pct": 0, "message": "Hashing..."})
+        await broadcast("queue_progress", {"task_id": task_id, "progress_pct": 0, "message": f"Hashing ({mode})..."})
 
         # First, hash all files that don't have hashes
         # We pass side as loop identifier, but hasher handles just that side
-        count_pending = await hasher.hash_all_pending(side, progress_callback=progress_cb)
+        count_pending = await hasher.hash_all_pending(side, progress_callback=progress_cb, mode=mode)
         
         # Find duplicates by grouping by hash
         async with get_db() as db:
@@ -128,6 +135,40 @@ class DedupeService:
             "reclaimable_bytes": reclaimable,
         }
     
+    async def get_latest_scan(self, side: str | None = None) -> dict | None:
+        """Get the most recent scan if available."""
+        async with get_db() as db:
+            query = "SELECT scan_id, side, created_at FROM dedupe_groups"
+            params = []
+            if side:
+                query += " WHERE side = ?"
+                params.append(side)
+            query += " ORDER BY created_at DESC LIMIT 1"
+            
+            cursor = await db.execute(query, tuple(params))
+            row = await cursor.fetchone()
+            
+            if not row:
+                return None
+            
+            scan_id = row["scan_id"]
+            
+            # Get stats
+            groups = await self.get_groups(scan_id)
+            total_groups = len(groups)
+            total_files = sum(len(g.files) for g in groups)
+            reclaimable = sum(sum(f.size for f in g.files[1:]) for g in groups) # Sum size of all but first
+            
+            return {
+                "scan_id": scan_id,
+                "side": row["side"],
+                "total_files": total_files,
+                "duplicate_groups": total_groups,
+                "duplicate_files": total_files - total_groups,
+                "reclaimable_bytes": reclaimable,
+                "created_at": row["created_at"]
+            }
+
     async def get_groups(self, scan_id: str) -> list[DuplicateGroup]:
         async with get_db() as db:
             cursor = await db.execute(

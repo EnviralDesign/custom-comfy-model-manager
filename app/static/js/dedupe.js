@@ -11,6 +11,22 @@ const Dedupe = {
 
     init() {
         this.bindEvents();
+        this.checkPreviousScan();
+    },
+
+    async checkPreviousScan() {
+        try {
+            const result = await App.api('GET', '/dedupe/scan/latest');
+            if (result && result.scan_id) {
+                console.log('Found previous scan:', result);
+                this.scanId = result.scan_id;
+                this.side = result.side;
+                await this.loadGroups();
+                this.showStep('wizard');
+            }
+        } catch (err) {
+            console.log('No previous scan or error loading it:', err);
+        }
     },
 
     bindEvents() {
@@ -32,10 +48,12 @@ const Dedupe = {
 
     async startScan(side) {
         this.side = side;
+        const modeFast = document.getElementById('scan-mode-fast')?.checked;
+        const mode = modeFast ? 'fast' : 'full';
         this.showStep('scanning');
 
         try {
-            const result = await App.api('POST', '/dedupe/scan', { side });
+            const result = await App.api('POST', '/dedupe/scan', { side, mode });
             console.log('Scan queued:', result);
             this.waitForScan(result.task_id);
         } catch (err) {

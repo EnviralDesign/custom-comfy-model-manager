@@ -11,6 +11,7 @@ router = APIRouter()
 
 class ScanRequest(BaseModel):
     side: Literal["local", "lake"]
+    mode: Literal["full", "fast"] = "full"
 
 
 class ScanResponse(BaseModel):
@@ -41,7 +42,7 @@ async def start_scan(request: ScanRequest):
     Enqueues a 'dedupe_scan' task.
     """
     dedupe_service = DedupeService()
-    task_id = await dedupe_service.enqueue_scan(request.side)
+    task_id = await dedupe_service.enqueue_scan(request.side, mode=request.mode)
     return {"task_id": task_id, "status": "queued"}
 
 
@@ -67,6 +68,16 @@ async def execute_dedupe(request: ExecuteRequest):
         scan_id=request.scan_id,
         selections=request.selections,
     )
+    return result
+
+
+@router.get("/scan/latest", response_model=ScanResponse | None)
+async def get_latest_scan(side: str | None = None):
+    """Retrieve the results of the most recent completed scan."""
+    dedupe_service = DedupeService()
+    result = await dedupe_service.get_latest_scan(side)
+    if not result:
+        return None
     return result
 
 

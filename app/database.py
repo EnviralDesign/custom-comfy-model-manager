@@ -102,7 +102,7 @@ async def startup_db() -> None:
             try:
                 # Try to insert a dummy verify task within a transaction that we roll back
                 await db.execute("BEGIN TRANSACTION")
-                await db.execute("INSERT INTO queue (task_type, created_at) VALUES ('dedupe_scan', '2000-01-01')")
+                await db.execute("INSERT INTO queue (task_type, created_at) VALUES ('verify', '2000-01-01')")
                 await db.execute("ROLLBACK")
             except Exception:
                 # Constraint failed, we need to migrate

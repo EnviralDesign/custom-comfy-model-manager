@@ -117,7 +117,8 @@ class QueueWorker:
                 await self._execute_verify(task)
             elif task["task_type"] == "dedupe_scan":
                 from app.services.dedupe import DedupeService
-                result = await DedupeService().execute_scan(task_id=task_id, side=task["src_side"])
+                mode = task["dst_side"] if task["dst_side"] in ("full", "fast") else "full"
+                result = await DedupeService().execute_scan(task_id=task_id, side=task["src_side"], mode=mode)
                 # Broadcast specific completion for dedupe to share scan_id
                 await broadcast("task_complete", {
                     "task_id": task_id, 

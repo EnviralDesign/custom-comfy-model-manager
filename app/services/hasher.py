@@ -52,6 +52,32 @@ def compute_hash_sync(filepath: Path, progress_callback: Callable[[int], None] |
     return hasher.hexdigest()
 
 
+def compute_partial_hash_sync(filepath: Path) -> str:
+    """
+    Compute partial BLAKE3 hash (first 4MB + last 4MB).
+    Used for 'fast' dedupe mode.
+    """
+    hasher = blake3.blake3()
+    chunk_size = 4 * 1024 * 1024  # 4MB
+    
+    with open(filepath, "rb") as f:
+        # First 4MB
+        start_chunk = f.read(chunk_size)
+        hasher.update(start_chunk)
+        
+        # Last 4MB (if file is larger than 4MB, otherwise we just read the whole thing above)
+        f.seek(0, 2) # Seek end
+        size = f.tell()
+        
+        if size > len(start_chunk):
+            seek_pos = max(len(start_chunk), size - chunk_size)
+            f.seek(seek_pos)
+            end_chunk = f.read(chunk_size)
+            hasher.update(end_chunk)
+            
+    return hasher.hexdigest()
+
+
 class HasherService:
     """Service for computing and caching BLAKE3 hashes."""
     
@@ -67,11 +93,17 @@ class HasherService:
         side: Literal["local", "lake"],
         relpath: str,
         force: bool = False,
+        mode: Literal["full", "fast"] = "full",
     ) -> str | None:
         """
         Get the hash for a file, computing if necessary.
         
-        Uses cache if size+mtime unchanged.
+        Args:
+            side: 'local' or 'lake'
+            relpath: File path
+            force: Recompute even if cached
+            mode: 'full' (hashed entire file) or 'fast' (partial hash)
+            
         Returns None if file doesn't exist.
         """
         root = self._get_root(side)
@@ -82,8 +114,9 @@ class HasherService:
         
         stat = filepath.stat()
         
+        # Check cache
+        cached_hash = None
         if not force:
-            # Check cache
             async with get_db() as db:
                 cursor = await db.execute(
                     """
@@ -94,16 +127,41 @@ class HasherService:
                 )
                 row = await cursor.fetchone()
                 if row:
-                    return row["hash"]
+                    cached_hash = row["hash"]
+
+        # Decision logic based on mode and cache
+        if cached_hash:
+            is_fast_hash = cached_hash.startswith("fast:")
+            
+            if mode == "fast":
+                # For fast mode, any existing hash (full or fast) is acceptable
+                return cached_hash
+            
+            if mode == "full" and not is_fast_hash:
+                # For full mode, only accept non-fast hashes
+                return cached_hash
+                
+            # If we are here, we have a fast hash but need full -> recompute
         
-        # Compute hash in thread pool
+        # Compute hash
         loop = asyncio.get_event_loop()
-        hash_value = await loop.run_in_executor(
-            get_hash_executor(),
-            compute_hash_sync,
-            filepath,
-            None
-        )
+        
+        if mode == "fast":
+            # Compute partial
+            raw_hash = await loop.run_in_executor(
+                get_hash_executor(),
+                compute_partial_hash_sync,
+                filepath
+            )
+            hash_value = f"fast:{raw_hash}"
+        else:
+            # Compute full
+            hash_value = await loop.run_in_executor(
+                get_hash_executor(),
+                compute_hash_sync,
+                filepath,
+                None
+            )
         
         # Update cache
         now = datetime.now(timezone.utc).isoformat()
