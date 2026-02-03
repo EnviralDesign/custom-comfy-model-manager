@@ -268,6 +268,7 @@ const Sync = {
             html += `
                 <div class="diff-row diff-row-folder" data-path="${folderPath}" data-depth="${depth}">
                     <div class="diff-col diff-col-local">
+                        ${this.config.local_allow_delete && folderStatus.local === 'has-files' ? `<button class="btn-icon btn-delete" data-action="delete-folder" data-side="local" data-folder="${folderPath}" title="Delete all in folder from Local">🗑️</button>` : ''}
                         <span class="btn-slot">
                             ${showSyncToLake ? `<button class="btn-icon btn-copy" data-action="sync-folder-to-lake" data-folder="${folderPath}" title="Copy ${folderStatus.onlyLocalCount || ''} to Lake →">→</button>` : ''}
                         </span>
@@ -288,6 +289,7 @@ const Sync = {
                         <span class="btn-slot">
                             ${showSyncToLocal ? `<button class="btn-icon btn-copy" data-action="sync-folder-to-local" data-folder="${folderPath}" title="← Copy ${folderStatus.onlyLakeCount || ''} to Local">←</button>` : ''}
                         </span>
+                        ${this.config.lake_allow_delete && folderStatus.lake === 'has-files' ? `<button class="btn-icon btn-delete" data-action="delete-folder" data-side="lake" data-folder="${folderPath}" title="Delete all in folder from Lake">🗑️</button>` : ''}
                     </div>
                 </div>
             `;
@@ -448,6 +450,14 @@ const Sync = {
             const relpath = target.dataset.relpath;
             const side = target.dataset.side;
             this.enqueueDelete(side, relpath);
+            return;
+        }
+
+        // Folder delete buttons
+        if (target.dataset.action === 'delete-folder') {
+            const folderPath = target.dataset.folder;
+            const side = target.dataset.side;
+            this.enqueueFolderDelete(side, folderPath);
             return;
         }
 
@@ -625,6 +635,43 @@ const Sync = {
             this.updateRowQueueStatus();
         } catch (err) {
             alert('Folder copy failed: ' + err.message);
+        }
+    },
+
+    async enqueueFolderDelete(side, folderPath) {
+        // Find all files in this folder that exist on the target side
+        const filesToDelete = this.diffData.filter(entry => {
+            if (!entry.relpath.startsWith(folderPath + '/') && entry.relpath !== folderPath) return false;
+            // Check existence
+            if (side === 'local' && entry.local_size !== null) return true;
+            if (side === 'lake' && entry.lake_size !== null) return true;
+            return false;
+        });
+
+        if (filesToDelete.length === 0) {
+            alert('No files to delete in this folder');
+            return;
+        }
+
+        const confirmed = confirm(`Are you SURE you want to DELETE ${filesToDelete.length} files from ${side}?\n\nFolder: ${folderPath}\n\nThis cannot be undone.`);
+        if (!confirmed) return;
+
+        try {
+            for (const file of filesToDelete) {
+                await App.api('POST', '/queue/delete', {
+                    side: side,
+                    relpath: file.relpath,
+                });
+
+                // Track in local state
+                this.queuedFiles.set(file.relpath, { status: 'pending', taskId: null });
+            }
+
+            // Refresh queue panel and update row styles
+            App.loadQueueTasks();
+            this.updateRowQueueStatus();
+        } catch (err) {
+            alert('Folder delete failed: ' + err.message);
         }
     }
 };
