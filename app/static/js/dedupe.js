@@ -11,14 +11,29 @@ const Dedupe = {
 
     init() {
         this.bindEvents();
-        this.checkPreviousScan();
+        this.checkState();
     },
 
-    async checkPreviousScan() {
+    async checkState() {
+        // 1. Check for active (running) scan
+        try {
+            const active = await App.api('GET', '/dedupe/scan/status');
+            if (active && active.task_id) {
+                console.log('Resuming active scan:', active);
+                this.side = active.side;
+                this.showStep('scanning');
+                this.waitForScan(active.task_id);
+                return; // Stop here, don't load old results if we are scanning
+            }
+        } catch (err) {
+            console.log('Error checking active scan:', err);
+        }
+
+        // 2. Check for completed previous scan
         try {
             const result = await App.api('GET', '/dedupe/scan/latest');
             if (result && result.scan_id) {
-                console.log('Found previous scan:', result);
+                console.log('Found completed previous scan:', result);
                 this.scanId = result.scan_id;
                 this.side = result.side;
                 await this.loadGroups();

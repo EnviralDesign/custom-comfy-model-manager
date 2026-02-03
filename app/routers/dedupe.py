@@ -36,6 +36,21 @@ class ExecuteRequest(BaseModel):
     selections: list[KeepSelection]
 
 
+class ScanStatusResponse(BaseModel):
+    task_id: int
+    status: str
+    side: str
+    mode: str
+
+
+@router.get("/scan/status", response_model=ScanStatusResponse | None)
+async def get_scan_status():
+    """Check for any active (pending/running) dedupe scan."""
+    dedupe_service = DedupeService()
+    result = await dedupe_service.get_active_scan()
+    return result
+
+
 @router.post("/scan", response_model=ScanResponse)
 async def start_scan(request: ScanRequest):
     """

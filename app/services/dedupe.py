@@ -55,6 +55,30 @@ class DedupeService:
             await db.commit()
             return cursor.lastrowid
             
+    async def get_active_scan(self) -> dict | None:
+        """Get currently running or pending dedupe scan task."""
+        async with get_db() as db:
+            cursor = await db.execute(
+                "SELECT id, status, src_side, dst_side FROM queue WHERE task_type = 'dedupe_scan' AND status IN ('pending', 'running') ORDER BY id DESC LIMIT 1"
+            )
+            row = await cursor.fetchone()
+            if row:
+                # Parse config from dst_side if possible (it stores JSON config now)
+                try:
+                    import json
+                    config = json.loads(row["dst_side"])
+                    mode = config.get("mode", "full")
+                except:
+                    mode = "full"
+                    
+                return {
+                    "task_id": row["id"],
+                    "status": row["status"], 
+                    "side": row["src_side"],
+                    "mode": mode
+                }
+        return None
+
     async def execute_scan(self, task_id: int, side: Literal["local", "lake"], mode: Literal["full", "fast"] = "full", min_size_bytes: int = 0) -> dict:
         """Execute a dedupe scan task (called by worker)."""
         scan_id = str(uuid.uuid4())
