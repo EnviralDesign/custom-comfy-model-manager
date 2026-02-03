@@ -12,6 +12,7 @@ class BundleAsset(BaseModel):
     relpath: str
     hash: Optional[str] = None
     source_url_override: Optional[str] = None
+    source_url: Optional[str] = None
 
 
 class Bundle(BaseModel):
@@ -75,17 +76,24 @@ class BundleService:
                 updated_at=row["updated_at"],
             )
             
-            # Get assets
-            cursor = await db.execute(
-                "SELECT relpath, hash, source_url_override FROM bundle_assets WHERE bundle_id = ? ORDER BY relpath",
-                (row["id"],)
-            )
+            # Get assets with potential global source URLs
+            cursor = await db.execute("""
+                SELECT ba.relpath, ba.hash, ba.source_url_override,
+                       COALESCE(su_hash.url, su_path.url) as global_source_url
+                FROM bundle_assets ba
+                LEFT JOIN source_urls su_hash ON su_hash.key = ba.hash AND ba.hash IS NOT NULL
+                LEFT JOIN source_urls su_path ON su_path.key = 'relpath:' || ba.relpath
+                WHERE ba.bundle_id = ?
+                ORDER BY ba.relpath
+            """, (row["id"],))
+            
             assets = await cursor.fetchall()
             for asset_row in assets:
                 bundle.assets.append(BundleAsset(
                     relpath=asset_row["relpath"],
                     hash=asset_row["hash"],
                     source_url_override=asset_row["source_url_override"],
+                    source_url=asset_row["global_source_url"]
                 ))
             
             bundle.asset_count = len(assets)

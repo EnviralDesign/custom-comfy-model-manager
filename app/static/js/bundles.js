@@ -119,7 +119,7 @@ const Bundles = {
                                 ${a.hash ? `<div style="font-size: 11px; color: var(--text-muted);">Hash: ${a.hash.slice(0, 12)}...</div>` : ''}
                             </td>
                             <td>
-                                ${a.source_url_override ? '✅' : '<span style="color: var(--text-muted);">-</span>'}
+                                ${a.source_url_override || a.source_url ? '✅' : '<span style="color: var(--text-muted);">-</span>'}
                             </td>
                             <td>
                                 <button class="btn-icon btn-danger" onclick="Bundles.removeAsset('${a.relpath}')" title="Remove from bundle">✕</button>
