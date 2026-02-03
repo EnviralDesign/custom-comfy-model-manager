@@ -477,10 +477,14 @@ const Sync = {
                     src_relpath: file.relpath,
                     dst_side: dstSide,
                 });
+
+                // Track in local state
+                this.queuedFiles.set(file.relpath, { status: 'pending', taskId: null });
             }
-            // Refresh queue panel
+
+            // Refresh queue panel and update row styles
             App.loadQueueTasks();
-            alert(`${filesToCopy.length} files queued for copy`);
+            this.updateRowQueueStatus();
         } catch (err) {
             alert('Folder copy failed: ' + err.message);
         }
