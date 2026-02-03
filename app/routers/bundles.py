@@ -110,6 +110,14 @@ async def add_asset(name: str, request: AddAssetRequest):
     return {"status": "added", "relpath": request.relpath}
 
 
+@router.post("/bundles/{name}/assets/folder")
+async def add_folder_assets(name: str, folder_path: str):
+    """Add all assets in a folder to a bundle."""
+    service = get_bundle_service()
+    count = await service.add_folder(name, folder_path)
+    return {"status": "added", "count": count}
+
+
 @router.delete("/bundles/{name}/assets/{relpath:path}")
 async def remove_asset(name: str, relpath: str):
     """Remove an asset from a bundle."""

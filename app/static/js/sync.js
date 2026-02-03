@@ -379,7 +379,10 @@ const Sync = {
                         <span class="folder-icon">📁</span>
                         <span class="folder-name">${folderName}</span>
                         <span class="folder-count">(${itemCount})</span>
-                        ${showVerify ? `<button class="btn-verify" data-action="verify-folder" data-folder="${folderPath}" title="Verify hashes for this folder" style="margin-left: auto">✓?</button>` : ''}
+                        <div class="path-actions">
+                            ${showVerify ? `<button class="btn-verify" data-action="verify-folder" data-folder="${folderPath}" title="Verify hashes for this folder">✓?</button>` : ''}
+                            <button class="btn-add-bundle" data-action="add-folder-to-bundle" data-folder="${folderPath}" title="Add all in folder to bundle">📦</button>
+                        </div>
                     </div>
                     <div class="diff-col diff-col-lake">
                         <span class="presence-bar ${folderStatus.lake === 'has-files' ? 'present' : 'absent'}"></span>
@@ -446,10 +449,12 @@ const Sync = {
                         <span class="tree-indent" style="width: ${depth * 20}px"></span>
                         <span class="status-icon ${statusClass}" title="${this.getStatusTooltip(file.status)}">${statusIcon}</span>
                         <span class="file-name" title="${file.relpath}">${file.filename}</span>
-                        ${isProbableSame ? `<button class="btn-verify btn-verify-file" data-action="verify-file" data-relpath="${file.relpath}" title="Verify hash">✓?</button>` : ''}
-                        ${hashBtn}
-                        ${sourceUrlBtn}
-                        ${bundleBtn}
+                        <div class="path-actions">
+                            ${isProbableSame ? `<button class="btn-verify btn-verify-file" data-action="verify-file" data-relpath="${file.relpath}" title="Verify hash">✓?</button>` : ''}
+                            ${hashBtn}
+                            ${sourceUrlBtn}
+                            ${bundleBtn}
+                        </div>
                     </div>
                     <div class="diff-col diff-col-lake">
                         <span class="presence-bar ${hasLake ? 'present' : 'absent'}"></span>
@@ -609,12 +614,19 @@ const Sync = {
             return;
         }
 
-        // Add to Bundle button
+        // Add to Bundle button (File)
         if (target.dataset.action === 'add-to-bundle') {
             const hash = target.dataset.hash;
             const relpath = target.dataset.relpath;
             const filename = target.dataset.filename;
             this.openAddToBundleModal(hash, relpath, filename);
+            return;
+        }
+
+        // Add to Bundle button (Folder)
+        if (target.dataset.action === 'add-folder-to-bundle') {
+            const folderPath = target.dataset.folder;
+            this.openAddFolderToBundleModal(folderPath);
             return;
         }
     },
@@ -1036,6 +1048,78 @@ const Sync = {
 
         modal.style.display = 'flex';
         modal.classList.add('visible');
+    },
+
+    openAddFolderToBundleModal(folderPath) {
+        let modal = document.getElementById('add-folder-to-bundle-modal');
+        if (!modal) {
+            modal = document.createElement('div');
+            modal.id = 'add-folder-to-bundle-modal';
+            modal.className = 'modal-overlay';
+            modal.innerHTML = `
+                <div class="modal-content">
+                    <div class="modal-header">
+                        <h3>📦 Add Folder to Bundle</h3>
+                        <button class="modal-close" onclick="Sync.closeAddFolderToBundleModal()">×</button>
+                    </div>
+                    <div class="modal-body">
+                        <p class="modal-folder-path" style="font-weight: 500; margin-bottom: 12px; font-family: var(--font-mono); font-size: 13px;"></p>
+                        <p style="margin-bottom: 8px;">Select a bundle to add ALL files in this folder to:</p>
+                        <div id="bundle-folder-options-list" style="max-height: 200px; overflow-y: auto; border: 1px solid var(--border); border-radius: var(--radius-sm);">
+                            <!-- Bundle list injected here -->
+                        </div>
+                    </div>
+                    <div class="modal-footer">
+                        <button class="btn" onclick="Sync.closeAddFolderToBundleModal()">Cancel</button>
+                    </div>
+                </div>
+            `;
+            document.body.appendChild(modal);
+
+            modal.addEventListener('click', (e) => {
+                if (e.target === modal) this.closeAddFolderToBundleModal();
+            });
+        }
+
+        modal.querySelector('.modal-folder-path').textContent = folderPath || '(root)';
+        const list = document.getElementById('bundle-folder-options-list');
+
+        if (this.bundles.length === 0) {
+            list.innerHTML = `<div style="padding: 12px; color: var(--text-muted); text-align: center;">No bundles found. Create one first.</div>`;
+        } else {
+            list.innerHTML = this.bundles.map(b => `
+                <div class="bundle-option" onclick="Sync.addFolderToBundle('${b.name}', '${folderPath}')" 
+                     style="padding: 10px 12px; border-bottom: 1px solid var(--border); cursor: pointer; transition: background 0.2s;">
+                    ${b.name}
+                </div>
+            `).join('');
+
+            list.querySelectorAll('.bundle-option').forEach(opt => {
+                opt.onmouseover = () => opt.style.background = 'var(--bg-hover)';
+                opt.onmouseout = () => opt.style.background = 'transparent';
+            });
+        }
+
+        modal.style.display = 'flex';
+        modal.classList.add('visible');
+    },
+
+    closeAddFolderToBundleModal() {
+        const modal = document.getElementById('add-folder-to-bundle-modal');
+        if (modal) {
+            modal.style.display = 'none';
+            modal.classList.remove('visible');
+        }
+    },
+
+    async addFolderToBundle(bundleName, folderPath) {
+        try {
+            const result = await App.api('POST', `/bundles/${encodeURIComponent(bundleName)}/assets/folder?folder_path=${encodeURIComponent(folderPath)}`);
+            this.closeAddFolderToBundleModal();
+            alert(`Successfully added ${result.count} assets to bundle "${bundleName}"`);
+        } catch (err) {
+            alert('Failed to add folder: ' + err.message);
+        }
     },
 
     closeAddToBundleModal() {

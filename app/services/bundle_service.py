@@ -157,6 +157,41 @@ class BundleService:
             except Exception as e:
                 print(f"Failed to add asset: {e}")
                 return False
+
+    async def add_folder(self, bundle_name: str, folder_path: str) -> int:
+        """Add all files in a folder (recursive) to a bundle."""
+        bundle = await self.get_bundle(bundle_name)
+        if not bundle:
+            return 0
+            
+        async with get_db() as db:
+            # Find all files in index starting with folder_path
+            search_pattern = f"{folder_path}/%" if folder_path else "%"
+            cursor = await db.execute("""
+                SELECT relpath, 
+                       COALESCE(lake_hash, local_hash) as hash
+                FROM file_index 
+                WHERE relpath LIKE ?
+            """, (search_pattern,))
+            
+            assets_to_add = await cursor.fetchall()
+            if not assets_to_add:
+                return 0
+                
+            now = datetime.now(timezone.utc).isoformat()
+            
+            # Batch add (INSERT OR REPLACE prevents duplicates if some files already in bundle)
+            await db.executemany("""
+                INSERT OR REPLACE INTO bundle_assets (bundle_id, relpath, hash)
+                VALUES (?, ?, ?)
+            """, [(bundle.id, a["relpath"], a["hash"]) for a in assets_to_add])
+            
+            await db.execute(
+                "UPDATE bundles SET updated_at = ? WHERE id = ?",
+                (now, bundle.id)
+            )
+            await db.commit()
+            return len(assets_to_add)
     
     async def remove_asset(self, bundle_name: str, relpath: str) -> bool:
         """Remove an asset from a bundle."""

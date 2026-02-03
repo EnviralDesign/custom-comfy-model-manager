@@ -461,6 +461,14 @@ a:hover {
     /* For ::before pseudo-elements */
 }
 
+.path-actions {
+    margin-left: auto;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex-shrink: 0;
+}
+
 .status-icon {
     font-size: 12px;
     width: 16px;
