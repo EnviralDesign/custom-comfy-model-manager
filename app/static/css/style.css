@@ -334,6 +334,8 @@ a:hover {
     flex: 1;
     overflow-y: auto;
     overflow-x: hidden;
+    padding-bottom: 70px;
+    /* Clearance for fixed queue panel */
 }
 
 .diff-tree-container .loading,
@@ -962,6 +964,199 @@ a:hover {
 
 .font-mono {
     font-family: var(--font-mono);
+}
+
+/* ========== Source URL Button ========== */
+.btn-source-url {
+    background: transparent;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    color: var(--text-muted);
+    width: 24px;
+    height: 20px;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 12px;
+    margin-left: 8px;
+    opacity: 0;
+    transition: all 0.15s;
+}
+
+.diff-row:hover .btn-source-url {
+    opacity: 0.5;
+}
+
+.btn-source-url:hover {
+    opacity: 1 !important;
+    background: var(--accent);
+    border-color: var(--accent);
+    color: white;
+}
+
+.btn-source-url.has-url {
+    opacity: 0.8;
+    border-color: var(--success);
+    color: var(--success);
+}
+
+.btn-source-url.has-url:hover {
+    background: var(--success);
+    color: white;
+}
+
+/* ========== Hash File Button ========== */
+.btn-hash-file {
+    background: transparent;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    color: var(--text-muted);
+    width: 24px;
+    height: 20px;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 12px;
+    margin-left: 8px;
+    opacity: 0;
+    transition: all 0.15s;
+}
+
+.diff-row:hover .btn-hash-file {
+    opacity: 0.5;
+}
+
+.btn-hash-file:hover {
+    opacity: 1 !important;
+    background: var(--warning);
+    border-color: var(--warning);
+    color: white;
+}
+
+/* ========== Modal ========== */
+.modal-overlay {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background: rgba(0, 0, 0, 0.7);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 1000;
+    opacity: 0;
+    visibility: hidden;
+    transition: all 0.2s ease;
+}
+
+.modal-overlay.visible {
+    opacity: 1;
+    visibility: visible;
+}
+
+.modal-content {
+    background: var(--bg-secondary);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-lg);
+    width: 500px;
+    max-width: 90vw;
+    box-shadow: var(--shadow);
+    transform: translateY(-20px);
+    transition: transform 0.2s ease;
+}
+
+.modal-overlay.visible .modal-content {
+    transform: translateY(0);
+}
+
+.modal-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 16px 20px;
+    border-bottom: 1px solid var(--border);
+}
+
+.modal-header h3 {
+    margin: 0;
+    font-size: 16px;
+    font-weight: 600;
+}
+
+.modal-close {
+    background: none;
+    border: none;
+    color: var(--text-muted);
+    font-size: 24px;
+    cursor: pointer;
+    padding: 0;
+    line-height: 1;
+}
+
+.modal-close:hover {
+    color: var(--text-primary);
+}
+
+.modal-body {
+    padding: 20px;
+}
+
+.modal-body label {
+    display: block;
+    font-size: 13px;
+    color: var(--text-secondary);
+    margin-bottom: 8px;
+}
+
+.modal-input {
+    width: 100%;
+    padding: 10px 14px;
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+    color: var(--text-primary);
+    font-size: 14px;
+    margin-bottom: 12px;
+}
+
+.modal-input:focus {
+    outline: none;
+    border-color: var(--accent);
+    box-shadow: var(--shadow-glow);
+}
+
+.modal-filename {
+    font-family: var(--font-mono);
+    font-size: 12px;
+    color: var(--text-secondary);
+    margin-bottom: 4px;
+    word-break: break-all;
+}
+
+.modal-hash {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--text-muted);
+    margin-bottom: 16px;
+    word-break: break-all;
+}
+
+.modal-hint {
+    font-size: 12px;
+    color: var(--text-muted);
+    margin: 0;
+}
+
+.modal-footer {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 16px 20px;
+    border-top: 1px solid var(--border);
+    justify-content: flex-end;
 }
 
 /* ========== Scrollbar ========== */

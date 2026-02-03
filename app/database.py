@@ -31,7 +31,7 @@ CREATE INDEX IF NOT EXISTS idx_file_index_size ON file_index(size);
 -- Queue: transfer and delete tasks
 CREATE TABLE IF NOT EXISTS queue (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    task_type TEXT NOT NULL CHECK (task_type IN ('copy', 'delete', 'verify')),
+    task_type TEXT NOT NULL CHECK (task_type IN ('copy', 'delete', 'verify', 'dedupe_scan', 'hash_file')),
     status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'running', 'completed', 'failed', 'cancelled')),
     src_side TEXT,  -- 'local' or 'lake', NULL for delete tasks
     src_relpath TEXT,
@@ -68,6 +68,20 @@ CREATE TABLE IF NOT EXISTS dedupe_files (
 );
 
 CREATE INDEX IF NOT EXISTS idx_dedupe_groups_scan ON dedupe_groups(scan_id);
+
+-- Source URLs: maps file hashes to public download URLs
+CREATE TABLE IF NOT EXISTS source_urls (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    key TEXT NOT NULL UNIQUE,  -- hash or 'relpath:xxx' for unhashed files
+    url TEXT NOT NULL,
+    filename_hint TEXT,
+    notes TEXT,
+    relpath TEXT,  -- set for relpath-based entries (unhashed files)
+    added_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_source_urls_key ON source_urls(key);
+CREATE INDEX IF NOT EXISTS idx_source_urls_relpath ON source_urls(relpath) WHERE relpath IS NOT NULL;
 """
 
 
@@ -94,35 +108,34 @@ async def startup_db() -> None:
     settings = get_settings()
     db_path = settings.get_db_path()
     
-    # Run migration if needed (simplest way for this phase: check if we can insert 'verify')
+    # Run migration if needed - check if we can insert 'hash_file'
     async with aiosqlite.connect(db_path) as db:
-        # Check if table exists
+        # Check if queue table exists
         cursor = await db.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='queue'")
         if await cursor.fetchone():
             try:
-                # Try to insert a dummy verify task within a transaction that we roll back
+                # Try to insert a dummy hash_file task within a transaction that we roll back
                 await db.execute("BEGIN TRANSACTION")
-                await db.execute("INSERT INTO queue (task_type, created_at) VALUES ('verify', '2000-01-01')")
+                await db.execute("INSERT INTO queue (task_type, created_at) VALUES ('hash_file', '2000-01-01')")
                 await db.execute("ROLLBACK")
             except Exception:
                 # Constraint failed, we need to migrate
-                print("Migrating queue table to support 'verify' and 'dedupe_scan' tasks...")
+                print("Migrating queue table to support 'hash_file' tasks...")
                 await db.execute("ROLLBACK")
                 
                 # Rename old table
-                # Ensure queue_old is gone first (in case of failed previous run)
                 await db.execute("DROP TABLE IF EXISTS queue_old")
                 await db.execute("ALTER TABLE queue RENAME TO queue_old")
                 
-                # Create new table
+                # Create new table with updated constraint
                 await db.execute("""
                 CREATE TABLE IF NOT EXISTS queue (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    task_type TEXT NOT NULL CHECK (task_type IN ('copy', 'delete', 'verify', 'dedupe_scan')),
+                    task_type TEXT NOT NULL CHECK (task_type IN ('copy', 'delete', 'verify', 'dedupe_scan', 'hash_file')),
                     status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'running', 'completed', 'failed', 'cancelled')),
-                    src_side TEXT,  -- 'local' or 'lake', NULL for delete tasks
+                    src_side TEXT,
                     src_relpath TEXT,
-                    dst_side TEXT,  -- 'local' or 'lake'
+                    dst_side TEXT,
                     dst_relpath TEXT,
                     size_bytes INTEGER,
                     bytes_transferred INTEGER DEFAULT 0,
@@ -131,7 +144,6 @@ async def startup_db() -> None:
                     created_at TEXT NOT NULL,
                     started_at TEXT,
                     completed_at TEXT,
-                    -- Extra fields for verify tasks
                     verify_folder TEXT
                 );
                 """)

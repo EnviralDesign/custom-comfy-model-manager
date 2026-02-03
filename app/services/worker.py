@@ -115,6 +115,8 @@ class QueueWorker:
                 await self._execute_delete(task)
             elif task["task_type"] == "verify":
                 await self._execute_verify(task)
+            elif task["task_type"] == "hash_file":
+                await self._execute_hash_file(task)
             elif task["task_type"] == "dedupe_scan":
                 from app.services.dedupe import DedupeService
                 import json
@@ -150,8 +152,16 @@ class QueueWorker:
                 )
                 await db.commit()
             
-            # Broadcast completion
-            await broadcast("task_complete", {"task_id": task_id, "status": "completed"})
+            # Broadcast completion with task details for immediate UI update
+            await broadcast("task_complete", {
+                "task_id": task_id, 
+                "status": "completed",
+                "task_type": task["task_type"],
+                "src_relpath": task.get("src_relpath"),
+                "dst_relpath": task.get("dst_relpath"),
+                "src_side": task.get("src_side"),
+                "dst_side": task.get("dst_side"),
+            })
             
         except asyncio.CancelledError:
             # Task was cancelled
@@ -458,6 +468,84 @@ class QueueWorker:
                 continue
         
         print(f"Verification complete: {verified_count}/{total_files} files")
+
+    async def _execute_hash_file(self, task: dict):
+        """Execute a single file hash task."""
+        import blake3
+        
+        relpath = task["src_relpath"]
+        task_id = task["id"]
+        
+        print(f"Hashing file: {relpath}")
+        
+        local_path = self.settings.local_models_root / relpath.replace("/", "\\")
+        lake_path = self.settings.lake_models_root / relpath.replace("/", "\\")
+        
+        now = datetime.now(timezone.utc).isoformat()
+        computed_hash = None
+        
+        # Hash whichever side(s) exist
+        for side, path in [("local", local_path), ("lake", lake_path)]:
+            if path.exists():
+                # Check if already hashed
+                async with get_db() as db:
+                    cursor = await db.execute(
+                        "SELECT hash FROM file_index WHERE side = ? AND relpath = ?",
+                        (side, relpath)
+                    )
+                    row = await cursor.fetchone()
+                    if row and row["hash"]:
+                        computed_hash = row["hash"]
+                        print(f"  {side}: already hashed ({computed_hash[:8]}...)")
+                        continue
+                
+                # Hash the file
+                hasher = blake3.blake3()
+                file_size = path.stat().st_size
+                bytes_read = 0
+                
+                async with aiofiles.open(path, 'rb') as f:
+                    while chunk := await f.read(1024 * 1024):
+                        hasher.update(chunk)
+                        bytes_read += len(chunk)
+                        
+                        # Progress update
+                        if file_size > 0:
+                            pct = int((bytes_read / file_size) * 100)
+                            if pct % 20 == 0:
+                                await broadcast("queue_progress", {
+                                    "task_id": task_id,
+                                    "bytes_transferred": bytes_read,
+                                    "total_bytes": file_size,
+                                    "progress_pct": pct,
+                                })
+                
+                computed_hash = hasher.hexdigest()
+                
+                # Update database
+                async with get_db() as db:
+                    await db.execute(
+                        "UPDATE file_index SET hash = ?, hash_computed_at = ? WHERE side = ? AND relpath = ?",
+                        (computed_hash, now, side, relpath)
+                    )
+                    await db.commit()
+                
+                print(f"  {side}: hashed ({computed_hash[:8]}...)")
+        
+        # Migrate any relpath-based source URL to hash-based
+        if computed_hash:
+            from app.services.source_manager import get_source_manager
+            source_mgr = get_source_manager()
+            await source_mgr.migrate_relpath_to_hash(relpath, computed_hash)
+            
+            # Broadcast that this file now has a hash (UI can update)
+            await broadcast("file_hashed", {
+                "relpath": relpath,
+                "hash": computed_hash,
+            })
+        
+        print(f"Hash complete: {relpath}")
+
 
 
 # Convenience functions

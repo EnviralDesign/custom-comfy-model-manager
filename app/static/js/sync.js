@@ -8,11 +8,13 @@ const Sync = {
     expandedFolders: new Set(),
     selectedItems: new Set(),
     queuedFiles: new Map(),  // relpath -> {status: 'pending'|'running', taskId: n}
+    sourceUrls: new Map(),   // hash -> {url, added_at, notes}
 
     async init() {
         this.bindEvents();
         await this.loadConfig();
         await this.loadQueueState();
+        await this.loadSourceUrls();
         await this.refresh();
     },
 
@@ -38,6 +40,28 @@ const Sync = {
             }
         } catch (err) {
             console.error('Failed to load queue state:', err);
+        }
+    },
+
+    async loadSourceUrls() {
+        try {
+            const result = await App.api('GET', '/index/sources');
+            this.sourceUrls.clear();
+            this.sourceUrlsByRelpath = this.sourceUrlsByRelpath || new Map();
+            this.sourceUrlsByRelpath.clear();
+
+            for (const source of result.sources) {
+                if (source.key.startsWith('relpath:')) {
+                    // Relpath-based (unhashed)
+                    const relpath = source.key.substring(8); // Remove 'relpath:' prefix
+                    this.sourceUrlsByRelpath.set(relpath, source);
+                } else {
+                    // Hash-based
+                    this.sourceUrls.set(source.key, source);
+                }
+            }
+        } catch (err) {
+            console.error('Failed to load source URLs:', err);
         }
     },
 
@@ -71,7 +95,7 @@ const Sync = {
         // Listen for WebSocket task completion events
         let refreshDebounce;
         document.addEventListener('ws:task_complete', async (e) => {
-            const { task_id, status } = e.detail;
+            const { task_id, status, task_type, src_relpath, dst_relpath, src_side, dst_side } = e.detail;
 
             // Remove from queued files
             for (const [relpath, info] of this.queuedFiles) {
@@ -81,12 +105,22 @@ const Sync = {
                 }
             }
 
+            // For copy tasks, immediately update the diff data and row
+            if (task_type === 'copy' && status === 'completed' && src_relpath) {
+                this.handleCopyComplete(src_relpath, src_side, dst_side);
+            }
+
+            // For delete tasks, update immediately
+            if (task_type === 'delete' && status === 'completed' && dst_relpath) {
+                this.handleDeleteComplete(dst_relpath, dst_side);
+            }
+
             // Update UI immediately for the completed file
             this.updateRowQueueStatus();
 
-            // Debounce full refresh to avoid multiple rapid re-renders
+            // Debounce full refresh to heal any discrepancies
             clearTimeout(refreshDebounce);
-            refreshDebounce = setTimeout(() => this.refreshDiff(), 500);
+            refreshDebounce = setTimeout(() => this.refreshDiff(), 2000);
 
             // Also refresh the queue panel
             App.loadQueueTasks();
@@ -128,6 +162,57 @@ const Sync = {
                 row.classList.add(`queue-${queueInfo.status}`);
             }
         });
+    },
+
+    handleCopyComplete(relpath, srcSide, dstSide) {
+        // Find the file in diffData and update its state
+        const file = this.diffData.find(f => f.relpath === relpath);
+        if (!file) return;
+
+        // After copy, file exists on both sides with same size
+        // Update the diff entry optimistically
+        if (srcSide === 'local' && dstSide === 'lake') {
+            // Copied from local to lake
+            file.lake_size = file.local_size;
+            file.lake_hash = file.local_hash;
+            file.status = file.local_hash ? 'same' : 'probable_same';
+        } else if (srcSide === 'lake' && dstSide === 'local') {
+            // Copied from lake to local
+            file.local_size = file.lake_size;
+            file.local_hash = file.lake_hash;
+            file.status = file.lake_hash ? 'same' : 'probable_same';
+        }
+
+        // Rebuild tree and re-render
+        this.treeData = this.buildTree(this.diffData);
+        this.render(document.getElementById('search-input')?.value || '');
+    },
+
+    handleDeleteComplete(relpath, side) {
+        // Find the file in diffData and update its state
+        const file = this.diffData.find(f => f.relpath === relpath);
+        if (!file) return;
+
+        // After delete, remove the file from that side
+        if (side === 'local') {
+            file.local_size = null;
+            file.local_hash = null;
+            file.status = 'only_lake';
+        } else if (side === 'lake') {
+            file.lake_size = null;
+            file.lake_hash = null;
+            file.status = 'only_local';
+        }
+
+        // If file no longer exists on either side, remove from diffData
+        if (file.local_size === null && file.lake_size === null) {
+            const idx = this.diffData.indexOf(file);
+            if (idx > -1) this.diffData.splice(idx, 1);
+        }
+
+        // Rebuild tree and re-render
+        this.treeData = this.buildTree(this.diffData);
+        this.render(document.getElementById('search-input')?.value || '');
     },
 
     async refresh() {
@@ -317,6 +402,23 @@ const Sync = {
             const queueInfo = this.queuedFiles.get(file.relpath);
             const queueClass = queueInfo ? `queue-${queueInfo.status}` : '';
 
+            // Check for hash and source URL
+            const fileHash = file.lake_hash || file.local_hash;
+            const hasHash = !!fileHash;
+
+            // Check for source URL (by hash or by relpath)
+            const hasSourceUrlByHash = fileHash && this.sourceUrls.has(fileHash);
+            const hasSourceUrlByRelpath = this.sourceUrlsByRelpath?.has(file.relpath);
+            const hasSourceUrl = hasSourceUrlByHash || hasSourceUrlByRelpath;
+
+            // Hash button - shows on unhashed files (on lake side which is the archive)
+            const hashBtn = (!hasHash && hasLake)
+                ? `<button class="btn-hash-file" data-action="hash-file" data-relpath="${file.relpath}" title="Compute hash for this file">#️⃣</button>`
+                : '';
+
+            // URL button - shows on ALL files
+            const sourceUrlBtn = `<button class="btn-source-url ${hasSourceUrl ? 'has-url' : ''}" data-action="source-url" data-hash="${fileHash || ''}" data-relpath="${file.relpath}" data-filename="${file.filename}" title="${hasSourceUrl ? 'Edit source URL' : 'Add source URL'}">🔗</button>`;
+
             html += `
                 <div class="diff-row diff-row-file ${statusClass} ${queueClass}" data-relpath="${file.relpath}" data-depth="${depth}">
                     <div class="diff-col diff-col-local">
@@ -332,6 +434,8 @@ const Sync = {
                         <span class="status-icon ${statusClass}" title="${this.getStatusTooltip(file.status)}">${statusIcon}</span>
                         <span class="file-name" title="${file.relpath}">${file.filename}</span>
                         ${isProbableSame ? `<button class="btn-verify btn-verify-file" data-action="verify-file" data-relpath="${file.relpath}" title="Verify hash">✓?</button>` : ''}
+                        ${hashBtn}
+                        ${sourceUrlBtn}
                     </div>
                     <div class="diff-col diff-col-lake">
                         <span class="presence-bar ${hasLake ? 'present' : 'absent'}"></span>
@@ -473,6 +577,32 @@ const Sync = {
             const relpath = target.dataset.relpath;
             this.verifyFile(relpath);
             return;
+        }
+
+        // Hash file button
+        if (target.dataset.action === 'hash-file') {
+            const relpath = target.dataset.relpath;
+            this.queueHashFile(relpath);
+            return;
+        }
+
+        // Source URL button
+        if (target.dataset.action === 'source-url') {
+            const hash = target.dataset.hash;
+            const relpath = target.dataset.relpath;
+            const filename = target.dataset.filename;
+            this.openSourceUrlModal(hash, relpath, filename);
+            return;
+        }
+    },
+
+    async queueHashFile(relpath) {
+        try {
+            await App.api('POST', `/index/hash-file?relpath=${encodeURIComponent(relpath)}`);
+            App.loadQueueTasks();
+        } catch (err) {
+            console.error('Failed to queue hash:', err);
+            alert('Failed to queue hash: ' + err.message);
         }
     },
 
@@ -672,6 +802,159 @@ const Sync = {
             this.updateRowQueueStatus();
         } catch (err) {
             alert('Folder delete failed: ' + err.message);
+        }
+    },
+
+    // ==================== Source URL Modal ====================
+
+    openSourceUrlModal(hash, relpath, filename) {
+        // Check if modal exists, create if not
+        let modal = document.getElementById('source-url-modal');
+        if (!modal) {
+            modal = document.createElement('div');
+            modal.id = 'source-url-modal';
+            modal.className = 'modal-overlay';
+            modal.innerHTML = `
+                <div class="modal-content">
+                    <div class="modal-header">
+                        <h3>🔗 Source URL</h3>
+                        <button class="modal-close" onclick="Sync.closeSourceUrlModal()">×</button>
+                    </div>
+                    <div class="modal-body">
+                        <p class="modal-filename"></p>
+                        <p class="modal-hash"></p>
+                        <label for="source-url-input">Public Web URL:</label>
+                        <input type="url" id="source-url-input" class="modal-input" placeholder="https://huggingface.co/model-org/model-name/resolve/main/model.safetensors" />
+                        <p class="modal-hint">Enter the public download URL for this model. This allows remote provisioning to download directly from the source.</p>
+                        <p class="modal-hash-hint"></p>
+                    </div>
+                    <div class="modal-footer">
+                        <button class="btn btn-danger" id="source-url-delete" style="margin-right: auto;">Delete</button>
+                        <button class="btn" onclick="Sync.closeSourceUrlModal()">Cancel</button>
+                        <button class="btn btn-primary" id="source-url-save">Save</button>
+                    </div>
+                </div>
+            `;
+            document.body.appendChild(modal);
+
+            // Close on overlay click
+            modal.addEventListener('click', (e) => {
+                if (e.target === modal) this.closeSourceUrlModal();
+            });
+        }
+
+        // Check for existing source URL (by hash or relpath)
+        const hasHash = hash && hash.length > 0;
+        const existingByHash = hasHash ? this.sourceUrls.get(hash) : null;
+        const existingByRelpath = this.sourceUrlsByRelpath?.get(relpath);
+        const existing = existingByHash || existingByRelpath;
+
+        // Populate modal
+        modal.querySelector('.modal-filename').textContent = `File: ${filename}`;
+        modal.querySelector('.modal-hash').textContent = hasHash ? `Hash: ${hash}` : `Path: ${relpath}`;
+        modal.querySelector('#source-url-input').value = existing?.url || '';
+
+        // Show hint if unhashed
+        const hashHint = modal.querySelector('.modal-hash-hint');
+        if (!hasHash) {
+            hashHint.textContent = '⚠️ File not yet hashed. URL will be saved by path and a hash will be queued.';
+            hashHint.style.color = 'var(--warning)';
+            hashHint.style.marginTop = '8px';
+        } else {
+            hashHint.textContent = '';
+        }
+
+        // Show/hide delete button
+        const deleteBtn = modal.querySelector('#source-url-delete');
+        deleteBtn.style.display = existing ? 'block' : 'none';
+
+        // Bind save action
+        const saveBtn = modal.querySelector('#source-url-save');
+        saveBtn.onclick = () => this.saveSourceUrl(hash, relpath, filename);
+
+        // Bind delete action
+        deleteBtn.onclick = () => this.deleteSourceUrl(hash, relpath);
+
+        // Show modal
+        modal.classList.add('visible');
+        modal.querySelector('#source-url-input').focus();
+    },
+
+    closeSourceUrlModal() {
+        const modal = document.getElementById('source-url-modal');
+        if (modal) {
+            modal.classList.remove('visible');
+        }
+    },
+
+    async saveSourceUrl(hash, relpath, filename) {
+        const input = document.getElementById('source-url-input');
+        const url = input.value.trim();
+
+        if (!url) {
+            alert('Please enter a URL');
+            return;
+        }
+
+        const hasHash = hash && hash.length > 0;
+
+        try {
+            if (hasHash) {
+                // Has hash - save by hash
+                await App.api('PUT', `/index/sources/${hash}`, {
+                    url: url,
+                    filename_hint: filename,
+                });
+                // Update local cache
+                this.sourceUrls.set(hash, { key: hash, url, filename_hint: filename });
+            } else {
+                // No hash - save by relpath and queue hash
+                await App.api('PUT', `/index/sources/by-relpath/${encodeURIComponent(relpath)}`, {
+                    url: url,
+                    filename_hint: filename,
+                    queue_hash: true,
+                });
+                // Update local cache
+                this.sourceUrlsByRelpath = this.sourceUrlsByRelpath || new Map();
+                this.sourceUrlsByRelpath.set(relpath, { key: `relpath:${relpath}`, url, filename_hint: filename, relpath });
+                // Refresh queue
+                App.loadQueueTasks();
+            }
+
+            // Close modal and re-render to update button state
+            this.closeSourceUrlModal();
+            this.render(document.getElementById('search-input')?.value || '');
+
+        } catch (err) {
+            alert('Failed to save source URL: ' + err.message);
+        }
+    },
+
+    async deleteSourceUrl(hash, relpath) {
+        if (!confirm('Remove the source URL for this file?')) {
+            return;
+        }
+
+        const hasHash = hash && hash.length > 0;
+        const existingByHash = hasHash ? this.sourceUrls.get(hash) : null;
+
+        try {
+            if (existingByHash) {
+                // Delete by hash
+                await App.api('DELETE', `/index/sources/${hash}`);
+                this.sourceUrls.delete(hash);
+            } else {
+                // Delete by relpath
+                await App.api('DELETE', `/index/sources/by-relpath/${encodeURIComponent(relpath)}`);
+                this.sourceUrlsByRelpath?.delete(relpath);
+            }
+
+            // Close modal and re-render
+            this.closeSourceUrlModal();
+            this.render(document.getElementById('search-input')?.value || '');
+
+        } catch (err) {
+            alert('Failed to delete source URL: ' + err.message);
         }
     }
 };

@@ -140,10 +140,12 @@ async def remote_page(request: Request):
 from app.routers import index as index_router
 from app.routers import queue as queue_router
 from app.routers import dedupe as dedupe_router
+from app.routers import sources as sources_router
 
 app.include_router(index_router.router, prefix="/api/index", tags=["index"])
 app.include_router(queue_router.router, prefix="/api/queue", tags=["queue"])
 app.include_router(dedupe_router.router, prefix="/api/dedupe", tags=["dedupe"])
+app.include_router(sources_router.router, prefix="/api/index", tags=["sources"])
 
 from app.routers import remote as remote_router
 from app.routers import remote_assets
