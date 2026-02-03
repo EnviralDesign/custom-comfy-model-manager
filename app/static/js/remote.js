@@ -20,7 +20,9 @@ document.addEventListener('DOMContentLoaded', () => {
         actionsPanel: document.getElementById('actions-panel'),
         btnInstallComfy: document.getElementById('btn-install-comfy'),
         btnCreateVenv: document.getElementById('btn-create-venv'),
-        taskList: document.getElementById('remote-task-list')
+        taskList: document.getElementById('remote-task-list'),
+        bundleList: document.getElementById('bundle-provision-list'),
+        btnProvision: document.getElementById('btn-provision-bundles')
     };
 
     let pollInterval = null;
@@ -92,6 +94,69 @@ document.addEventListener('DOMContentLoaded', () => {
             renderTasks(tasks);
         } catch (e) {
             console.error('Task fetch failed', e);
+        }
+    }
+
+    async function loadBundles() {
+        try {
+            const res = await fetch('/api/bundles');
+            const data = await res.json();
+            renderBundles(data.bundles);
+        } catch (e) {
+            console.error('Failed to load bundles', e);
+        }
+    }
+
+    function renderBundles(bundles) {
+        if (!bundles || bundles.length === 0) {
+            els.bundleList.innerHTML = '<div class="text-secondary text-sm">No bundles found.</div>';
+            return;
+        }
+
+        els.bundleList.innerHTML = bundles.map(b => `
+            <label style="display: flex; align-items: center; gap: 8px; margin-bottom: 6px; cursor: pointer;">
+                <input type="checkbox" class="bundle-checkbox" data-name="${b.name}">
+                <span style="font-size: 0.9rem;">${b.name}</span>
+            </label>
+        `).join('');
+    }
+
+    async function provisionBundles() {
+        const selected = Array.from(els.bundleList.querySelectorAll('.bundle-checkbox:checked'))
+            .map(cb => cb.dataset.name);
+
+        if (selected.length === 0) {
+            alert('Please select at least one bundle.');
+            return;
+        }
+
+        try {
+            // 1. Resolve bundles to URLs
+            const res = await fetch('/api/bundles/resolve', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ bundle_names: selected })
+            });
+            const data = await res.json();
+
+            if (!data.assets || data.assets.length === 0) {
+                alert('Selected bundles contain no valid assets/URLs.');
+                return;
+            }
+
+            // 2. Enqueue the download task
+            // Payload format for DOWNLOAD_URLS: { urls: [ {relpath, url, hash}, ... ] }
+            await enqueueTask('DOWNLOAD_URLS', {
+                items: data.assets.map(a => ({
+                    relpath: a.relpath,
+                    url: a.url,
+                    hash: a.hash
+                }))
+            }, `Download ${selected.join(', ')}`);
+
+        } catch (e) {
+            console.error('Provisioning failed', e);
+            alert('Failed to provision: ' + e.message);
         }
     }
 
@@ -219,9 +284,12 @@ document.addEventListener('DOMContentLoaded', () => {
         enqueueTask('CREATE_VENV', {}, 'Create Venv (uv 3.13)');
     });
 
+    els.btnProvision.addEventListener('click', provisionBundles);
+
     // Initial load
     fetchStatus();
     fetchTasks();
+    loadBundles();
 
     // Polling (every 2s is enough for status)
     pollInterval = setInterval(() => {

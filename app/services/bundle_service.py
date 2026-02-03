@@ -21,6 +21,7 @@ class Bundle(BaseModel):
     created_at: str
     updated_at: str
     assets: List[BundleAsset] = []
+    asset_count: int = 0
 
 
 class ResolvedAsset(BaseModel):
@@ -51,6 +52,7 @@ class BundleService:
                     description=row["description"],
                     created_at=row["created_at"],
                     updated_at=row["updated_at"],
+                    asset_count=row["asset_count"]
                 )
                 bundles.append(bundle)
             return bundles
@@ -78,13 +80,15 @@ class BundleService:
                 "SELECT relpath, hash, source_url_override FROM bundle_assets WHERE bundle_id = ? ORDER BY relpath",
                 (row["id"],)
             )
-            for asset_row in await cursor.fetchall():
+            assets = await cursor.fetchall()
+            for asset_row in assets:
                 bundle.assets.append(BundleAsset(
                     relpath=asset_row["relpath"],
                     hash=asset_row["hash"],
                     source_url_override=asset_row["source_url_override"],
                 ))
             
+            bundle.asset_count = len(assets)
             return bundle
     
     async def create_bundle(self, name: str, description: Optional[str] = None) -> Bundle:

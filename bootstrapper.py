@@ -284,6 +284,55 @@ def handle_download(task):
         log("All sources failed.", error=True)
         update_progress(task['id'], "failed", 0.0, "All sources failed")
 
+def handle_download_urls(task):
+    payload = task.get('payload', {})
+    items = payload.get('items', [])
+    
+    if not items:
+        update_progress(task['id'], "completed", 1.0, "No items to download")
+        return
+
+    total_items = len(items)
+    update_progress(task['id'], "running", 0.0, f"Starting batch download of {total_items} items...")
+
+    for i, item in enumerate(items):
+        relpath = item.get('relpath')
+        url = item.get('url')
+        file_hash = item.get('hash')
+        
+        if not relpath or not url:
+            continue
+            
+        dest_path = MODELS_DIR / relpath
+        dest_path.parent.mkdir(parents=True, exist_ok=True)
+        
+        # Check if exists
+        if dest_path.exists():
+            # Simple size check could be added here
+            log(f"[{i+1}/{total_items}] {relpath} already exists. Skipping.")
+            continue
+
+        log(f"[{i+1}/{total_items}] Downloading {relpath}...")
+        update_progress(task['id'], "running", i / total_items, f"Downloading {i+1}/{total_items}: {relpath}")
+        
+        temp_dest = dest_path.with_suffix(dest_path.suffix + ".part")
+        
+        # Resume support logic (simple)
+        current_size = 0
+        if temp_dest.exists():
+            current_size = temp_dest.stat().st_size
+
+        ok, err = download_from_source(url, temp_dest, task['id'], current_size)
+        
+        if ok:
+            temp_dest.rename(dest_path)
+            log(f"Successfully downloaded {relpath}")
+        else:
+            log(f"Failed to download {relpath}: {err}", error=True)
+            # We continue with other items even if one fails
+    
+    update_progress(task['id'], "completed", 1.0, f"Batch download finished. Processed {total_items} items.")
+
 # --- MAIN LOOP ---
 
 def main():
@@ -328,6 +377,8 @@ def main():
                     handle_create_venv(task)
                 elif task['type'] == 'ASSET_DOWNLOAD':
                     handle_download(task)
+                elif task['type'] == 'DOWNLOAD_URLS':
+                    handle_download_urls(task)
                 else:
                     log(f"Unknown task type: {task['type']}")
                     update_progress(task['id'], "failed", error="Unknown task type")

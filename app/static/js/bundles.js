@@ -55,6 +55,13 @@ const Bundles = {
             window.location.hash = name;
             const bundle = await App.api('GET', `/bundles/${encodeURIComponent(name)}`);
             this.activeBundle = bundle;
+
+            // Sync with sidebar list
+            const idx = this.bundles.findIndex(b => b.name === name);
+            if (idx > -1) {
+                this.bundles[idx].asset_count = bundle.asset_count;
+            }
+
             this.renderSidebar(); // update active state
             this.renderDetail();
         } catch (err) {

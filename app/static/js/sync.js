@@ -9,12 +9,14 @@ const Sync = {
     selectedItems: new Set(),
     queuedFiles: new Map(),  // relpath -> {status: 'pending'|'running', taskId: n}
     sourceUrls: new Map(),   // hash -> {url, added_at, notes}
+    bundles: [],             // List of bundle names for quick add
 
     async init() {
         this.bindEvents();
         await this.loadConfig();
         await this.loadQueueState();
         await this.loadSourceUrls();
+        await this.loadBundles();
         await this.refresh();
     },
 
@@ -62,6 +64,16 @@ const Sync = {
             }
         } catch (err) {
             console.error('Failed to load source URLs:', err);
+        }
+    },
+
+    async loadBundles() {
+        try {
+            const result = await App.api('GET', '/bundles');
+            this.bundles = result.bundles || [];
+        } catch (err) {
+            console.error('Failed to load bundles:', err);
+            this.bundles = [];
         }
     },
 
@@ -416,8 +428,9 @@ const Sync = {
                 ? `<button class="btn-hash-file" data-action="hash-file" data-relpath="${file.relpath}" title="Compute hash for this file">#️⃣</button>`
                 : '';
 
-            // URL button - shows on ALL files
+            // URL and Bundle buttons
             const sourceUrlBtn = `<button class="btn-source-url ${hasSourceUrl ? 'has-url' : ''}" data-action="source-url" data-hash="${fileHash || ''}" data-relpath="${file.relpath}" data-filename="${file.filename}" title="${hasSourceUrl ? 'Edit source URL' : 'Add source URL'}">🔗</button>`;
+            const bundleBtn = `<button class="btn-add-bundle" data-action="add-to-bundle" data-hash="${fileHash || ''}" data-relpath="${file.relpath}" data-filename="${file.filename}" title="Add to bundle">📦</button>`;
 
             html += `
                 <div class="diff-row diff-row-file ${statusClass} ${queueClass}" data-relpath="${file.relpath}" data-depth="${depth}">
@@ -436,6 +449,7 @@ const Sync = {
                         ${isProbableSame ? `<button class="btn-verify btn-verify-file" data-action="verify-file" data-relpath="${file.relpath}" title="Verify hash">✓?</button>` : ''}
                         ${hashBtn}
                         ${sourceUrlBtn}
+                        ${bundleBtn}
                     </div>
                     <div class="diff-col diff-col-lake">
                         <span class="presence-bar ${hasLake ? 'present' : 'absent'}"></span>
@@ -592,6 +606,15 @@ const Sync = {
             const relpath = target.dataset.relpath;
             const filename = target.dataset.filename;
             this.openSourceUrlModal(hash, relpath, filename);
+            return;
+        }
+
+        // Add to Bundle button
+        if (target.dataset.action === 'add-to-bundle') {
+            const hash = target.dataset.hash;
+            const relpath = target.dataset.relpath;
+            const filename = target.dataset.filename;
+            this.openAddToBundleModal(hash, relpath, filename);
             return;
         }
     },
@@ -955,6 +978,87 @@ const Sync = {
 
         } catch (err) {
             alert('Failed to delete source URL: ' + err.message);
+        }
+    },
+
+    // ==================== Add to Bundle Modal ====================
+
+    openAddToBundleModal(hash, relpath, filename) {
+        let modal = document.getElementById('add-to-bundle-modal');
+        if (!modal) {
+            modal = document.createElement('div');
+            modal.id = 'add-to-bundle-modal';
+            modal.className = 'modal-overlay';
+            modal.innerHTML = `
+                <div class="modal-content">
+                    <div class="modal-header">
+                        <h3>📦 Add to Bundle</h3>
+                        <button class="modal-close" onclick="Sync.closeAddToBundleModal()">×</button>
+                    </div>
+                    <div class="modal-body">
+                        <p class="modal-filename" style="font-weight: 500; margin-bottom: 12px;"></p>
+                        <p style="margin-bottom: 8px;">Select a bundle to add this file to:</p>
+                        <div id="bundle-options-list" style="max-height: 200px; overflow-y: auto; border: 1px solid var(--border); border-radius: var(--radius-sm);">
+                            <!-- Bundle list injected here -->
+                        </div>
+                    </div>
+                    <div class="modal-footer">
+                        <button class="btn" onclick="Sync.closeAddToBundleModal()">Cancel</button>
+                    </div>
+                </div>
+            `;
+            document.body.appendChild(modal);
+
+            modal.addEventListener('click', (e) => {
+                if (e.target === modal) this.closeAddToBundleModal();
+            });
+        }
+
+        modal.querySelector('.modal-filename').textContent = filename;
+        const list = document.getElementById('bundle-options-list');
+
+        if (this.bundles.length === 0) {
+            list.innerHTML = `<div style="padding: 12px; color: var(--text-muted); text-align: center;">No bundles found. Create one in the <a href="/bundles">Bundles</a> page first.</div>`;
+        } else {
+            list.innerHTML = this.bundles.map(b => `
+                <div class="bundle-option" onclick="Sync.addAssetToBundle('${b.name}', '${relpath}', '${hash || ''}')" 
+                     style="padding: 10px 12px; border-bottom: 1px solid var(--border); cursor: pointer; transition: background 0.2s;">
+                    ${b.name}
+                </div>
+            `).join('');
+
+            // Add hover effect
+            list.querySelectorAll('.bundle-option').forEach(opt => {
+                opt.onmouseover = () => opt.style.background = 'var(--bg-hover)';
+                opt.onmouseout = () => opt.style.background = 'transparent';
+            });
+        }
+
+        modal.style.display = 'flex';
+        modal.classList.add('visible');
+    },
+
+    closeAddToBundleModal() {
+        const modal = document.getElementById('add-to-bundle-modal');
+        if (modal) {
+            modal.style.display = 'none';
+            modal.classList.remove('visible');
+        }
+    },
+
+    async addAssetToBundle(bundleName, relpath, hash) {
+        try {
+            await App.api('POST', `/bundles/${encodeURIComponent(bundleName)}/assets`, {
+                relpath: relpath,
+                hash: hash || null
+            });
+
+            this.closeAddToBundleModal();
+
+            // Just a small notification would be nice, but for now just close
+            console.log(`Added ${relpath} to ${bundleName}`);
+        } catch (err) {
+            alert('Failed to add to bundle: ' + err.message);
         }
     }
 };
