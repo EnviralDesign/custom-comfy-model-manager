@@ -21,56 +21,40 @@
         </div>
         <div class="nav-actions">
             <input type="text" id="search-input" class="search-input" placeholder="Search files...">
-            <button id="refresh-btn" class="btn btn-secondary" hx-post="/api/index/refresh" hx-swap="none">
-                🔄 Refresh
-            </button>
-            <div id="queue-widget" class="queue-widget">
-                <span class="queue-icon">📋</span>
-                <span class="queue-count">0</span>
-            </div>
+            <button id="refresh-btn" class="btn btn-secondary">🔄 Refresh</button>
+            <button id="expand-all-btn" class="btn btn-secondary">📂 Expand All</button>
+            <button id="collapse-all-btn" class="btn btn-secondary">📁 Collapse All</button>
         </div>
     </nav>
 
-    <main class="sync-layout">
-        <!-- Left Pane: Local -->
-        <div class="pane local-pane">
-            <div class="pane-header">
-                <h2>📁 Local</h2>
-                <span class="pane-path" title="{{ local_root }}">{{ local_root }}</span>
-                <div class="pane-stats" id="local-stats"></div>
+    <main class="diff-layout">
+        <!-- Unified Diff Header -->
+        <div class="diff-header">
+            <div class="diff-col diff-col-local">
+                <h3>📁 Local</h3>
+                <span class="diff-path" title="{{ local_root }}">{{ local_root }}</span>
+                <span id="local-stats" class="diff-stats"></span>
             </div>
-            <div class="folder-tree" id="local-folders"></div>
-            <div class="file-list" id="local-files"></div>
-        </div>
-
-        <!-- Center: Actions -->
-        <div class="action-column">
-            <div class="action-buttons">
-                <button class="btn btn-primary" id="copy-to-lake" disabled title="Copy selected to Lake">
-                    →
-                </button>
-                <button class="btn btn-primary" id="copy-to-local" disabled title="Copy selected to Local">
-                    ←
-                </button>
+            <div class="diff-col diff-col-path">
+                <h3>Path</h3>
+            </div>
+            <div class="diff-col diff-col-lake">
+                <h3>🌊 Lake</h3>
+                <span class="diff-path" title="{{ lake_root }}">{{ lake_root }}</span>
+                <span id="lake-stats" class="diff-stats"></span>
             </div>
         </div>
 
-        <!-- Right Pane: Lake -->
-        <div class="pane lake-pane">
-            <div class="pane-header">
-                <h2>🌊 Lake</h2>
-                <span class="pane-path" title="{{ lake_root }}">{{ lake_root }}</span>
-                <div class="pane-stats" id="lake-stats"></div>
-            </div>
-            <div class="folder-tree" id="lake-folders"></div>
-            <div class="file-list" id="lake-files"></div>
+        <!-- Unified Diff Tree -->
+        <div class="diff-tree-container" id="diff-tree">
+            <div class="loading">Loading...</div>
         </div>
     </main>
 
     <!-- Queue Panel -->
     <div class="queue-panel" id="queue-panel">
         <div class="queue-header">
-            <h3>Transfer Queue</h3>
+            <h3>📋 Transfer Queue</h3>
             <div class="queue-controls">
                 <button class="btn btn-small" id="pause-queue">⏸️</button>
                 <button class="btn btn-small" id="resume-queue">▶️</button>
