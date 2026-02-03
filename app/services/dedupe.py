@@ -30,14 +30,57 @@ class DedupeService:
         settings = get_settings()
         return settings.local_models_root if side == "local" else settings.lake_models_root
     
-    async def scan(self, side: Literal["local", "lake"]) -> dict:
-        """Scan for duplicates on one side."""
+    async def enqueue_scan(self, side: Literal["local", "lake"]) -> int:
+        """Enqueue a dedupe scan task."""
+        now = datetime.now(timezone.utc).isoformat()
+        async with get_db() as db:
+            cursor = await db.execute(
+                "INSERT INTO queue (task_type, src_side, created_at, size_bytes) VALUES ('dedupe_scan', ?, ?, 0)",
+                (side, now)
+            )
+            await db.commit()
+            return cursor.lastrowid
+            
+    async def execute_scan(self, task_id: int, side: Literal["local", "lake"]) -> dict:
+        """Execute a dedupe scan task (called by worker)."""
         scan_id = str(uuid.uuid4())
         now = datetime.now(timezone.utc).isoformat()
         hasher = HasherService()
         
+        # Helper for progress
+        from app.database import get_db
+        from app.websocket import broadcast
+        import time
+        
+        last_update = 0
+        
+        async def progress_cb(current, total, relpath):
+            nonlocal last_update
+            # Throttle updates
+            if time.time() - last_update > 0.5 or current == total:
+                pct = int((current / total) * 100) if total > 0 else 0
+                await broadcast("queue_progress", {
+                    "task_id": task_id,
+                    "progress_pct": pct,
+                    "bytes_transferred": current, # Using file count as bytes for simplicity
+                    "total_bytes": total,
+                    "message": f"Hashing {current}/{total}: {relpath}"
+                })
+                # Update DB
+                async with get_db() as db:
+                    await db.execute(
+                        "UPDATE queue SET bytes_transferred = ?, size_bytes = ? WHERE id = ?",
+                        (current, total, task_id)
+                    )
+                    await db.commit()
+                last_update = time.time()
+
+        # Update status to counting
+        await broadcast("queue_progress", {"task_id": task_id, "progress_pct": 0, "message": "Hashing..."})
+
         # First, hash all files that don't have hashes
-        await hasher.hash_all_pending(side)
+        # We pass side as loop identifier, but hasher handles just that side
+        count_pending = await hasher.hash_all_pending(side, progress_callback=progress_cb)
         
         # Find duplicates by grouping by hash
         async with get_db() as db:

@@ -146,6 +146,9 @@ class HasherService:
         for i, relpath in enumerate(pending):
             await self.get_hash(side, relpath)
             if progress_callback:
-                progress_callback(i + 1, total, relpath)
+                if asyncio.iscoroutinefunction(progress_callback):
+                    await progress_callback(i + 1, total, relpath)
+                else:
+                    progress_callback(i + 1, total, relpath)
         
         return total

@@ -102,21 +102,23 @@ async def startup_db() -> None:
             try:
                 # Try to insert a dummy verify task within a transaction that we roll back
                 await db.execute("BEGIN TRANSACTION")
-                await db.execute("INSERT INTO queue (task_type, created_at) VALUES ('verify', '2000-01-01')")
+                await db.execute("INSERT INTO queue (task_type, created_at) VALUES ('dedupe_scan', '2000-01-01')")
                 await db.execute("ROLLBACK")
             except Exception:
                 # Constraint failed, we need to migrate
-                print("Migrating queue table to support 'verify' tasks...")
+                print("Migrating queue table to support 'verify' and 'dedupe_scan' tasks...")
                 await db.execute("ROLLBACK")
                 
                 # Rename old table
+                # Ensure queue_old is gone first (in case of failed previous run)
+                await db.execute("DROP TABLE IF EXISTS queue_old")
                 await db.execute("ALTER TABLE queue RENAME TO queue_old")
                 
                 # Create new table
                 await db.execute("""
                 CREATE TABLE IF NOT EXISTS queue (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    task_type TEXT NOT NULL CHECK (task_type IN ('copy', 'delete', 'verify')),
+                    task_type TEXT NOT NULL CHECK (task_type IN ('copy', 'delete', 'verify', 'dedupe_scan')),
                     status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'running', 'completed', 'failed', 'cancelled')),
                     src_side TEXT,  -- 'local' or 'lake', NULL for delete tasks
                     src_relpath TEXT,
@@ -135,13 +137,27 @@ async def startup_db() -> None:
                 """)
                 
                 # Copy data back
-                await db.execute("""
-                INSERT INTO queue (id, task_type, status, src_side, src_relpath, dst_side, dst_relpath, 
-                                 size_bytes, bytes_transferred, error_message, retry_count, created_at, started_at, completed_at)
-                SELECT id, task_type, status, src_side, src_relpath, dst_side, dst_relpath, 
-                       size_bytes, bytes_transferred, error_message, retry_count, created_at, started_at, completed_at
-                FROM queue_old
-                """)
+                # Check column info to see if we have verify_folder in old table
+                cursor_cls = await db.execute("PRAGMA table_info(queue_old)")
+                cols = [row[1] for row in await cursor_cls.fetchall()]
+                has_verify_folder = 'verify_folder' in cols
+                
+                if has_verify_folder:
+                     await db.execute("""
+                    INSERT INTO queue (id, task_type, status, src_side, src_relpath, dst_side, dst_relpath, 
+                                     size_bytes, bytes_transferred, error_message, retry_count, created_at, started_at, completed_at, verify_folder)
+                    SELECT id, task_type, status, src_side, src_relpath, dst_side, dst_relpath, 
+                           size_bytes, bytes_transferred, error_message, retry_count, created_at, started_at, completed_at, verify_folder
+                    FROM queue_old
+                    """)
+                else:
+                    await db.execute("""
+                    INSERT INTO queue (id, task_type, status, src_side, src_relpath, dst_side, dst_relpath, 
+                                     size_bytes, bytes_transferred, error_message, retry_count, created_at, started_at, completed_at)
+                    SELECT id, task_type, status, src_side, src_relpath, dst_side, dst_relpath, 
+                           size_bytes, bytes_transferred, error_message, retry_count, created_at, started_at, completed_at
+                    FROM queue_old
+                    """)
                 
                 # Drop old table
                 await db.execute("DROP TABLE queue_old")

@@ -14,12 +14,14 @@ class ScanRequest(BaseModel):
 
 
 class ScanResponse(BaseModel):
-    scan_id: str
-    side: str
-    total_files: int
-    duplicate_groups: int
-    duplicate_files: int
-    reclaimable_bytes: int
+    task_id: int | None = None
+    status: str | None = None
+    scan_id: str | None = None
+    side: str | None = None
+    total_files: int | None = None
+    duplicate_groups: int | None = None
+    duplicate_files: int | None = None
+    reclaimable_bytes: int | None = None
 
 
 class KeepSelection(BaseModel):
@@ -36,11 +38,11 @@ class ExecuteRequest(BaseModel):
 async def start_scan(request: ScanRequest):
     """
     Start a duplicate scan on one side.
-    This computes hashes for all files and groups by hash.
+    Enqueues a 'dedupe_scan' task.
     """
     dedupe_service = DedupeService()
-    result = await dedupe_service.scan(request.side)
-    return result
+    task_id = await dedupe_service.enqueue_scan(request.side)
+    return {"task_id": task_id, "status": "queued"}
 
 
 @router.get("/results/{scan_id}", response_model=list[DuplicateGroup])

@@ -115,6 +115,20 @@ class QueueWorker:
                 await self._execute_delete(task)
             elif task["task_type"] == "verify":
                 await self._execute_verify(task)
+            elif task["task_type"] == "dedupe_scan":
+                from app.services.dedupe import DedupeService
+                result = await DedupeService().execute_scan(task_id=task_id, side=task["src_side"])
+                # Broadcast specific completion for dedupe to share scan_id
+                await broadcast("task_complete", {
+                    "task_id": task_id, 
+                    "status": "completed", 
+                    "result": result
+                })
+                # Skip the default broadcast below? No, duplicate broadcast is fine or we can return here.
+                # But standard completion update in DB happens below.
+                # Let's just store result in a field if we had one, but we don't.
+                # We will rely on the "result" payload in the event.
+
             
             # Mark as completed
             async with get_db() as db:

@@ -22,7 +22,7 @@ const Dedupe = {
         document.getElementById('confirm-delete')?.addEventListener('click', () => this.executeDelete());
         document.getElementById('start-over')?.addEventListener('click', () => this.reset());
 
-        document.addEventListener('scan:progress', (e) => this.updateScanProgress(e.detail));
+        document.getElementById('start-over')?.addEventListener('click', () => this.reset());
     },
 
     showStep(step) {
@@ -36,20 +36,56 @@ const Dedupe = {
 
         try {
             const result = await App.api('POST', '/dedupe/scan', { side });
-            this.scanId = result.scan_id;
-
-            if (result.duplicate_groups === 0) {
-                document.getElementById('complete-message').textContent = 'No duplicates found!';
-                this.showStep('complete');
-                return;
-            }
-
-            await this.loadGroups();
-            this.showStep('wizard');
+            console.log('Scan queued:', result);
+            this.waitForScan(result.task_id);
         } catch (err) {
             alert('Scan failed: ' + err.message);
             this.showStep('select');
         }
+    },
+
+    waitForScan(taskId) {
+        const progressBar = document.getElementById('scan-progress');
+        const statusText = document.getElementById('scan-status');
+
+        // Progress Handler
+        const progressHandler = (e) => {
+            const data = e.detail;
+            if (data.task_id === taskId) {
+                if (progressBar) progressBar.style.width = `${data.progress_pct}%`;
+                if (statusText) statusText.textContent = data.message || `Hashing... ${data.progress_pct}%`;
+            }
+        };
+
+        // Completion Handler
+        const completionHandler = async (e) => {
+            const data = e.detail;
+            if (data.task_id === taskId) {
+                // Cleanup listeners
+                document.removeEventListener('ws:queue_progress', progressHandler);
+                document.removeEventListener('ws:task_complete', completionHandler);
+
+                if (data.status === 'completed') {
+                    // Result contains scan stats
+                    const result = data.result;
+                    this.scanId = result.scan_id;
+
+                    if (result.duplicate_groups === 0) {
+                        document.getElementById('complete-message').textContent = 'No duplicates found!';
+                        this.showStep('complete');
+                    } else {
+                        await this.loadGroups();
+                        this.showStep('wizard');
+                    }
+                } else {
+                    alert('Scan failed: ' + (data.error || 'Unknown error'));
+                    this.showStep('select');
+                }
+            }
+        };
+
+        document.addEventListener('ws:queue_progress', progressHandler);
+        document.addEventListener('ws:task_complete', completionHandler);
     },
 
     async loadGroups() {
@@ -162,12 +198,7 @@ const Dedupe = {
         }
     },
 
-    updateScanProgress(data) {
-        const fill = document.getElementById('scan-progress');
-        const status = document.getElementById('scan-status');
-        if (fill) fill.style.width = `${data.percent || 0}%`;
-        if (status) status.textContent = data.message || 'Scanning...';
-    },
+
 
     reset() {
         this.scanId = null;
