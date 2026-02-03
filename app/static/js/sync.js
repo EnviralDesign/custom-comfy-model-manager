@@ -860,11 +860,13 @@ const Sync = {
                         <p class="modal-hash"></p>
                         <label for="source-url-input">Public Web URL:</label>
                         <input type="url" id="source-url-input" class="modal-input" placeholder="https://huggingface.co/model-org/model-name/resolve/main/model.safetensors" />
+                        <div id="url-test-result" style="margin-top: -8px; margin-bottom: 12px; font-size: 12px; display: none;"></div>
                         <p class="modal-hint">Enter the public download URL for this model. This allows remote provisioning to download directly from the source.</p>
                         <p class="modal-hash-hint"></p>
                     </div>
                     <div class="modal-footer">
                         <button class="btn btn-danger" id="source-url-delete" style="margin-right: auto;">Delete</button>
+                        <button class="btn" id="source-url-test">🔍 Test Link</button>
                         <button class="btn" onclick="Sync.closeSourceUrlModal()">Cancel</button>
                         <button class="btn btn-primary" id="source-url-save">Save</button>
                     </div>
@@ -910,9 +912,55 @@ const Sync = {
         // Bind delete action
         deleteBtn.onclick = () => this.deleteSourceUrl(hash, relpath);
 
+        // Bind test action
+        const testBtn = modal.querySelector('#source-url-test');
+        const testResult = modal.querySelector('#url-test-result');
+        testResult.style.display = 'none';
+        testBtn.onclick = () => this.testSourceUrl();
+
         // Show modal
         modal.classList.add('visible');
         modal.querySelector('#source-url-input').focus();
+    },
+
+    async testSourceUrl() {
+        const input = document.getElementById('source-url-input');
+        const url = input.value.trim();
+        const resultDiv = document.getElementById('url-test-result');
+        const testBtn = document.getElementById('source-url-test');
+
+        if (!url) return null;
+
+        testBtn.disabled = true;
+        testBtn.textContent = '⏱ Testing...';
+        resultDiv.style.display = 'block';
+        resultDiv.style.color = 'var(--text-muted)';
+        resultDiv.textContent = 'Checking URL connectivity...';
+
+        try {
+            const res = await App.api('GET', `/index/check-url?url=${encodeURIComponent(url)}`);
+            if (res.ok) {
+                resultDiv.style.color = 'var(--success)';
+                const sizeStr = res.size ? ` (${(res.size / (1024 * 1024)).toFixed(1)} MB)` : '';
+                resultDiv.innerHTML = `✅ Link OK! HTTP ${res.status}${sizeStr}`;
+                return res;
+            } else {
+                resultDiv.style.color = 'var(--danger)';
+                if (res.is_webpage) {
+                    resultDiv.textContent = `❌ Error: URL is a webpage, not a file download (HTTP ${res.status})`;
+                } else {
+                    resultDiv.textContent = `❌ Failed: ${res.error || 'Status ' + res.status}`;
+                }
+                return res;
+            }
+        } catch (err) {
+            resultDiv.style.color = 'var(--danger)';
+            resultDiv.textContent = `❌ Error: ${err.message}`;
+            return { ok: false, error: err.message };
+        } finally {
+            testBtn.disabled = false;
+            testBtn.textContent = '🔍 Test Link';
+        }
     },
 
     closeSourceUrlModal() {
@@ -929,6 +977,16 @@ const Sync = {
         if (!url) {
             alert('Please enter a URL');
             return;
+        }
+
+        // Auto-test before save
+        const testResult = await this.testSourceUrl();
+        if (testResult && !testResult.ok) {
+            const msg = testResult.is_webpage
+                ? "This URL looks like a webpage, not a direct file download. Remote downloads will likely fail.\n\nAre you sure you want to save it anyway?"
+                : "The link validation failed. Remote downloads will likely fail.\n\nAre you sure you want to save it anyway?";
+
+            if (!confirm(msg)) return;
         }
 
         const hasHash = hash && hash.length > 0;

@@ -118,8 +118,14 @@ const Bundles = {
                                 <div style="font-family: var(--font-mono); font-size: 13px;">${a.relpath}</div>
                                 ${a.hash ? `<div style="font-size: 11px; color: var(--text-muted);">Hash: ${a.hash.slice(0, 12)}...</div>` : ''}
                             </td>
-                            <td>
-                                ${a.source_url_override || a.source_url ? '✅' : '<span style="color: var(--text-muted);">-</span>'}
+                            <td class="asset-url-cell">
+                                ${a.source_url_override || a.source_url ? `
+                                    <div style="display: flex; align-items: center; gap: 8px;">
+                                        <span title="Linked">✅</span>
+                                        <button class="btn btn-small" style="font-size: 10px; padding: 2px 6px;" 
+                                                onclick="Bundles.testUrl('${a.source_url_override || a.source_url}', this)">Test</button>
+                                    </div>
+                                ` : '<span style="color: var(--text-muted);">-</span>'}
                             </td>
                             <td>
                                 <button class="btn-icon btn-danger" onclick="Bundles.removeAsset('${a.relpath}')" title="Remove from bundle">✕</button>
@@ -129,6 +135,27 @@ const Bundles = {
                 </tbody>
             </table>
         `;
+    },
+
+    async testUrl(url, btn) {
+        const originalText = btn.textContent;
+        btn.disabled = true;
+        btn.textContent = '...';
+
+        try {
+            const res = await App.api('GET', `/index/check-url?url=${encodeURIComponent(url)}`);
+            if (res.ok) {
+                const sizeStr = res.size ? ` (${(res.size / (1024 * 1024)).toFixed(1)} MB)` : '';
+                alert(`✅ Link OK!\nStatus: ${res.status}${sizeStr}\nType: ${res.type || 'unknown'}`);
+            } else {
+                alert(`❌ Link Failed!\nError: ${res.error || 'HTTP ' + res.status}`);
+            }
+        } catch (err) {
+            alert(`❌ Error: ${err.message}`);
+        } finally {
+            btn.disabled = false;
+            btn.textContent = originalText;
+        }
     },
 
     // ==================== Actions ====================

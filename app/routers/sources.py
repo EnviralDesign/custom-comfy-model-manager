@@ -8,7 +8,48 @@ from typing import Optional
 from app.services.source_manager import get_source_manager, ModelSource
 from app.database import get_db
 
+from starlette.concurrency import run_in_threadpool
+import requests
+
 router = APIRouter()
+
+
+@router.get("/check-url")
+async def check_url(url: str):
+    """
+    Check if a URL is valid and reachable.
+    Returns status code and file size if available.
+    """
+    def _check():
+        try:
+            # Try HEAD first (fast)
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+            }
+            response = requests.head(url, allow_redirects=True, timeout=10, headers=headers)
+            
+            # If 404 or other error, or if Content-Length is missing (some sites block HEAD), try GET
+            if response.status_code != 200 or not response.headers.get("Content-Length"):
+                response = requests.get(url, stream=True, timeout=10, headers=headers)
+            
+            size = response.headers.get("Content-Length")
+            content_type = response.headers.get("Content-Type", "").lower()
+            
+            # Heuristic: if it's text/html, it's likely a landing page, not a direct download
+            is_webpage = "text/html" in content_type
+            
+            return {
+                "ok": response.status_code == 200 and not is_webpage,
+                "status": response.status_code,
+                "size": int(size) if size else None,
+                "type": content_type,
+                "url": response.url,
+                "is_webpage": is_webpage
+            }
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+            
+    return await run_in_threadpool(_check)
 
 
 class SourceURLRequest(BaseModel):
