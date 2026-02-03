@@ -1114,9 +1114,8 @@ const Sync = {
 
     async addFolderToBundle(bundleName, folderPath) {
         try {
-            const result = await App.api('POST', `/bundles/${encodeURIComponent(bundleName)}/assets/folder?folder_path=${encodeURIComponent(folderPath)}`);
+            await App.api('POST', `/bundles/${encodeURIComponent(bundleName)}/assets/folder?folder_path=${encodeURIComponent(folderPath)}`);
             this.closeAddFolderToBundleModal();
-            alert(`Successfully added ${result.count} assets to bundle "${bundleName}"`);
         } catch (err) {
             alert('Failed to add folder: ' + err.message);
         }

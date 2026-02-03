@@ -502,9 +502,11 @@ a:hover {
     color: white;
 }
 
-.btn-icon.btn-delete:hover {
+.btn-icon.btn-delete:hover,
+.btn-icon.btn-danger:hover {
     background: var(--danger);
     border-color: var(--danger);
+    color: white;
 }
 
 .btn-copy {

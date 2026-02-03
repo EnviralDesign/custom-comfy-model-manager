@@ -169,9 +169,10 @@ class BundleService:
             search_pattern = f"{folder_path}/%" if folder_path else "%"
             cursor = await db.execute("""
                 SELECT relpath, 
-                       COALESCE(lake_hash, local_hash) as hash
+                       MAX(hash) as hash
                 FROM file_index 
                 WHERE relpath LIKE ?
+                GROUP BY relpath
             """, (search_pattern,))
             
             assets_to_add = await cursor.fetchall()
