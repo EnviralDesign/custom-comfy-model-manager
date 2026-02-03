@@ -1,0 +1,255 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Remote - ComfyUI Model Manager</title>
+    <link rel="stylesheet" href="/static/css/style.css">
+    <script src="/static/js/htmx.min.js"></script>
+    <style>
+        .remote-layout {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: var(--spacing-lg);
+            padding: var(--spacing-lg);
+            max-width: 1400px;
+            margin: 0 auto;
+        }
+
+        .panel {
+            background: var(--bg-secondary);
+            border-radius: var(--radius-lg);
+            border: 1px solid var(--border-color);
+            padding: var(--spacing-lg);
+        }
+
+        .panel-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: var(--spacing-md);
+            border-bottom: 1px solid var(--border-color);
+            padding-bottom: var(--spacing-sm);
+        }
+
+        .panel-title {
+            font-size: 1.25rem;
+            font-weight: 600;
+            color: var(--text-primary);
+        }
+
+        .status-badge {
+            display: inline-flex;
+            align-items: center;
+            padding: 4px 12px;
+            border-radius: 9999px;
+            font-size: 0.875rem;
+            font-weight: 500;
+        }
+
+        .status-off {
+            background: var(--bg-tertiary);
+            color: var(--text-secondary);
+        }
+
+        .status-active {
+            background: rgba(16, 185, 129, 0.1);
+            color: #10b981;
+            border: 1px solid rgba(16, 185, 129, 0.2);
+        }
+
+        .key-display {
+            background: var(--bg-tertiary);
+            padding: var(--spacing-md);
+            border-radius: var(--radius-md);
+            font-family: 'JetBrains Mono', monospace;
+            word-break: break-all;
+            margin: var(--spacing-md) 0;
+            border: 1px solid var(--border-color);
+            position: relative;
+        }
+
+        .blur-text {
+            filter: blur(4px);
+            user-select: none;
+            transition: filter 0.2s;
+        }
+
+        .key-display:hover .blur-text {
+            filter: blur(0);
+        }
+
+        .copy-btn {
+            position: absolute;
+            top: 4px;
+            right: 4px;
+            padding: 4px 8px;
+            font-size: 0.8rem;
+        }
+
+        .config-row {
+            display: flex;
+            justify-content: space-between;
+            padding: var(--spacing-sm) 0;
+            border-bottom: 1px solid var(--border-dim);
+        }
+
+        .config-label {
+            color: var(--text-secondary);
+        }
+
+        .config-value {
+            font-family: monospace;
+            color: var(--text-primary);
+        }
+
+        .agent-status-indicator {
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            background-color: var(--text-muted);
+            display: inline-block;
+            margin-right: 8px;
+        }
+
+        .agent-connected {
+            background-color: #10b981;
+            box-shadow: 0 0 8px rgba(16, 185, 129, 0.4);
+        }
+
+        .countdown {
+            font-variant-numeric: tabular-nums;
+            font-weight: bold;
+            color: var(--text-highlight);
+        }
+    </style>
+</head>
+
+<body>
+    <nav class="top-bar">
+        <div class="logo">
+            <span class="logo-icon">⚡</span>
+            <span class="logo-text">ComfyUI Model Manager</span>
+        </div>
+        <div class="nav-links">
+            <a href="/sync" class="nav-link">Sync</a>
+            <a href="/dedupe" class="nav-link">Dedupe</a>
+            <a href="/remote" class="nav-link active">Remote</a>
+        </div>
+        <div class="nav-actions">
+            <!-- Shared widgets could go here -->
+        </div>
+    </nav>
+
+    <main class="remote-layout">
+        <!-- Session Panel -->
+        <div class="panel" id="session-panel">
+            <div class="panel-header">
+                <div class="panel-title">📡 Remote Session</div>
+                <span id="session-status-badge" class="status-badge status-off">OFFLINE</span>
+            </div>
+
+            <div id="session-controls">
+                <p class="text-secondary mb-4">
+                    Enable a temporary session to allow a remote agent to connect.
+                </p>
+                <div class="config-row">
+                    <span class="config-label">Base URL</span>
+                    <span class="config-value" id="base-url-display">...</span>
+                </div>
+
+                <div id="active-session-ui" style="display: none;">
+                    <div class="mt-4">
+                        <label class="text-sm text-secondary">Session API Key (Copy this to script)</label>
+                        <div class="key-display">
+                            <code id="api-key-value" class="blur-text">...</code>
+                            <button class="btn btn-secondary copy-btn" onclick="copyApiKey()">Copy</button>
+                        </div>
+                    </div>
+
+                    <div class="config-row">
+                        <span class="config-label">Expires in</span>
+                        <span class="countdown" id="session-countdown">--:--</span>
+                    </div>
+
+                    <div class="mt-6">
+                        <button id="end-session-btn" class="btn btn-danger w-full">🛑 End Session</button>
+                    </div>
+                </div>
+
+                <div id="inactive-session-ui">
+                    <div class="mt-6">
+                        <button id="enable-session-btn" class="btn btn-primary w-full">🚀 Enable Remote Session</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Agent Panel -->
+        <div class="panel" id="agent-panel">
+            <div class="panel-header">
+                <div class="panel-title">🤖 Agent Status</div>
+                <div style="display: flex; align-items: center;">
+                    <span id="agent-indicator" class="agent-status-indicator"></span>
+                    <span id="agent-status-text">Disconnected</span>
+                </div>
+            </div>
+
+            <div id="agent-details" class="text-secondary">
+                <p>Waiting for agent connection...</p>
+                <p class="text-sm mt-2">
+                    Run the bootstrapper script on your remote machine (Ubuntu/WSL) with the API key from the left
+                    panel.
+                </p>
+            </div>
+
+            <div id="agent-connected-ui" style="display: none;">
+                <div class="config-row">
+                    <span class="config-label">Hostname</span>
+                    <span class="config-value" id="agent-hostname">--</span>
+                </div>
+                <div class="config-row">
+                    <span class="config-label">OS</span>
+                    <span class="config-value" id="agent-os">--</span>
+                </div>
+                <div class="config-row">
+                    <span class="config-label">Last Heartbeat</span>
+                    <span class="config-value" id="agent-heartbeat">--</span>
+                </div>
+            </div>
+        </div>
+
+        <!-- Actions Panel -->
+        <div class="panel" id="actions-panel" style="grid-column: 1 / -1; display: none;">
+            <div class="panel-header">
+                <div class="panel-title">🛠️ Actions</div>
+            </div>
+
+            <div class="remote-actions-grid"
+                style="display: grid; grid-template-columns: 1fr 2fr; gap: var(--spacing-lg);">
+                <!-- Action Buttons -->
+                <div class="action-buttons">
+                    <h4 class="mb-4">Commands</h4>
+                    <button id="btn-install-comfy" class="btn btn-secondary w-full mb-3" style="text-align: left;">
+                        📦 Install ComfyUI (Scaffold)
+                    </button>
+                    <!-- Future: Queue Downloads -->
+                </div>
+
+                <!-- Task List -->
+                <div class="task-list-container">
+                    <h4 class="mb-4">Task Queue</h4>
+                    <div id="remote-task-list" class="queue-list" style="max-height: 300px; overflow-y: auto;">
+                        <div class="text-secondary text-sm">No tasks queued.</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+    </main>
+
+    <script src="/static/js/remote.js"></script>
+</body>
+
+</html>

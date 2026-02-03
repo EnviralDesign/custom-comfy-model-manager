@@ -89,6 +89,12 @@ async def dedupe_page(request: Request):
     return templates.TemplateResponse("dedupe.html", {"request": request})
 
 
+@app.get("/remote", response_class=HTMLResponse)
+async def remote_page(request: Request):
+    """Remote session management view."""
+    return templates.TemplateResponse("remote.html", {"request": request})
+
+
 # ============================================================================
 # API Routes (imported from routers)
 # ============================================================================
@@ -100,6 +106,11 @@ from app.routers import dedupe as dedupe_router
 app.include_router(index_router.router, prefix="/api/index", tags=["index"])
 app.include_router(queue_router.router, prefix="/api/queue", tags=["queue"])
 app.include_router(dedupe_router.router, prefix="/api/dedupe", tags=["dedupe"])
+
+from app.routers import remote as remote_router
+from app.routers import remote_assets
+app.include_router(remote_router.router, prefix="/api/remote", tags=["remote"])
+app.include_router(remote_assets.router, prefix="/api/remote", tags=["remote-assets"])
 
 
 # ============================================================================

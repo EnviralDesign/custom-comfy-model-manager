@@ -31,6 +31,10 @@ class Settings(BaseSettings):
     # Hashing
     hash_workers: int = 2
     
+    # Remote Session (Phase 2)
+    remote_base_url: str = "https://your.domain.example"
+    remote_session_ttl_minutes: int = 60
+    
     # App data directory
     app_data_dir: Path | None = None
     
