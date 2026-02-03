@@ -12,6 +12,7 @@ router = APIRouter()
 class ScanRequest(BaseModel):
     side: Literal["local", "lake"]
     mode: Literal["full", "fast"] = "full"
+    min_size_bytes: int = 0
 
 
 class ScanResponse(BaseModel):
@@ -42,7 +43,7 @@ async def start_scan(request: ScanRequest):
     Enqueues a 'dedupe_scan' task.
     """
     dedupe_service = DedupeService()
-    task_id = await dedupe_service.enqueue_scan(request.side, mode=request.mode)
+    task_id = await dedupe_service.enqueue_scan(request.side, mode=request.mode, min_size_bytes=request.min_size_bytes)
     return {"task_id": task_id, "status": "queued"}
 
 

@@ -182,27 +182,39 @@ class HasherService:
         self,
         side: Literal["local", "lake"],
         progress_callback: Callable[[int, int, str], None] | None = None,
+        mode: Literal["full", "fast"] = "full",
+        min_size_bytes: int = 0,
     ) -> int:
         """
-        Hash all files on a side that don't have a hash yet.
+        Hash all files on a side that don't have a hash yet (or need upgrade).
         
         Args:
             side: Which side to hash
             progress_callback: Optional callback(current, total, relpath)
+            mode: 'full' or 'fast'
         
         Returns:
             Number of files hashed
         """
         async with get_db() as db:
-            cursor = await db.execute(
-                "SELECT relpath FROM file_index WHERE side = ? AND hash IS NULL",
-                (side,)
-            )
+            if mode == "full":
+                # For full mode, we need files with NO hash OR with FAST hash, AND meeting size req
+                cursor = await db.execute(
+                    "SELECT relpath FROM file_index WHERE side = ? AND (hash IS NULL OR hash LIKE 'fast:%') AND size >= ?",
+                    (side, min_size_bytes)
+                )
+            else:
+                # For fast mode, any existing hash is fine, so just process NULLs
+                cursor = await db.execute(
+                    "SELECT relpath FROM file_index WHERE side = ? AND hash IS NULL AND size >= ?",
+                    (side, min_size_bytes)
+                )
+            pending = [row["relpath"] for row in await cursor.fetchall()]
             pending = [row["relpath"] for row in await cursor.fetchall()]
         
         total = len(pending)
         for i, relpath in enumerate(pending):
-            await self.get_hash(side, relpath)
+            await self.get_hash(side, relpath, mode=mode)
             if progress_callback:
                 if asyncio.iscoroutinefunction(progress_callback):
                     await progress_callback(i + 1, total, relpath)

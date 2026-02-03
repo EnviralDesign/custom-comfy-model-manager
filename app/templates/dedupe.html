@@ -41,14 +41,27 @@
                         🌊 Scan Lake
                     </button>
                 </div>
-                <div class="scan-options" style="margin-top: 20px; color: var(--text-secondary);">
-                    <label
-                        style="display: flex; align-items: center; justify-content: flex-start; gap: 8px; cursor: pointer;">
-                        <input type="checkbox" id="scan-mode-fast">
-                        <span>⚡ Fast Scan (Partial Hash)</span>
-                    </label>
-                    <p style="font-size: 12px; margin-top: 4px; opacity: 0.7;">Uses first/last 4MB of files to find
-                        duplicates quickly.</p>
+                <div class="scan-options"
+                    style="margin-top: 20px; color: var(--text-secondary); display: flex; flex-direction: column; gap: 12px;">
+                    <div>
+                        <label
+                            style="display: flex; align-items: center; justify-content: flex-start; gap: 8px; cursor: pointer;">
+                            <input type="checkbox" id="scan-mode-fast">
+                            <span>⚡ Fast Scan (Partial Hash)</span>
+                        </label>
+                        <p style="font-size: 12px; margin-top: 4px; opacity: 0.7; margin-left: 24px;">Uses first/last
+                            4MB of files to find duplicates quickly.</p>
+                    </div>
+                    <div>
+                        <label style="display: flex; align-items: center; justify-content: flex-start; gap: 8px;">
+                            <span>Ignore files smaller than:</span>
+                            <input type="number" id="scan-min-size" value="1" min="0" step="1"
+                                style="width: 60px; padding: 4px; border-radius: 4px; border: 1px solid var(--border-color); background: var(--bg-card); color: var(--text-primary);">
+                            <span>MB</span>
+                        </label>
+                        <p style="font-size: 12px; margin-top: 4px; opacity: 0.7; margin-left: 0;">Filters out configs
+                            and tiny files.</p>
+                    </div>
                 </div>
             </div>
 
@@ -63,10 +76,15 @@
 
             <!-- Results / Wizard -->
             <div class="dedupe-step hidden" id="step-wizard">
-                <div class="wizard-header">
-                    <h2>Duplicate Groups</h2>
-                    <span class="wizard-progress">Group <span id="current-group">1</span> of <span
-                            id="total-groups">0</span></span>
+                <div class="wizard-header" style="display: flex; justify-content: space-between; align-items: start;">
+                    <div>
+                        <h2>Duplicate Groups</h2>
+                        <span class="wizard-progress">Group <span id="current-group">1</span> of <span
+                                id="total-groups">0</span></span>
+                    </div>
+                    <button class="btn btn-sm" id="discard-scan"
+                        style="background: rgba(255, 255, 255, 0.1); border: 1px solid rgba(255, 255, 255, 0.2);">✕
+                        Discard Scan</button>
                 </div>
 
                 <div class="duplicate-group" id="current-duplicate-group">

@@ -39,6 +39,21 @@ const Dedupe = {
         document.getElementById('start-over')?.addEventListener('click', () => this.reset());
 
         document.getElementById('start-over')?.addEventListener('click', () => this.reset());
+        document.getElementById('discard-scan')?.addEventListener('click', () => this.discardScan());
+    },
+
+    async discardScan() {
+        if (!confirm('Are you sure you want to discard this scan? You will lose these results.')) return;
+
+        if (this.scanId) {
+            try {
+                await App.api('DELETE', `/dedupe/scan/${this.scanId}`);
+            } catch (err) {
+                console.error('Failed to clear scan on backend', err);
+                alert('Warning: Could not clear scan from server, but resetting UI.');
+            }
+        }
+        this.reset();
     },
 
     showStep(step) {
@@ -50,10 +65,14 @@ const Dedupe = {
         this.side = side;
         const modeFast = document.getElementById('scan-mode-fast')?.checked;
         const mode = modeFast ? 'fast' : 'full';
+
+        const minSizeMb = parseInt(document.getElementById('scan-min-size')?.value || '1', 10);
+        const minSizeBytes = minSizeMb * 1024 * 1024;
+
         this.showStep('scanning');
 
         try {
-            const result = await App.api('POST', '/dedupe/scan', { side, mode });
+            const result = await App.api('POST', '/dedupe/scan', { side, mode, min_size_bytes: minSizeBytes });
             console.log('Scan queued:', result);
             this.waitForScan(result.task_id);
         } catch (err) {

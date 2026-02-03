@@ -117,8 +117,19 @@ class QueueWorker:
                 await self._execute_verify(task)
             elif task["task_type"] == "dedupe_scan":
                 from app.services.dedupe import DedupeService
-                mode = task["dst_side"] if task["dst_side"] in ("full", "fast") else "full"
-                result = await DedupeService().execute_scan(task_id=task_id, side=task["src_side"], mode=mode)
+                import json
+                
+                # Parse config from dst_side
+                try:
+                    config = json.loads(task["dst_side"])
+                    mode = config.get("mode", "full")
+                    min_size = config.get("min_size", 0)
+                except (json.JSONDecodeError, TypeError):
+                    # Fallback for legacy or plain string
+                    mode = task["dst_side"] if task["dst_side"] in ("full", "fast") else "full"
+                    min_size = 0
+                
+                result = await DedupeService().execute_scan(task_id=task_id, side=task["src_side"], mode=mode, min_size_bytes=min_size)
                 # Broadcast specific completion for dedupe to share scan_id
                 await broadcast("task_complete", {
                     "task_id": task_id, 

@@ -31,24 +31,31 @@ class DedupeService:
         settings = get_settings()
         return settings.local_models_root if side == "local" else settings.lake_models_root
     
-    async def enqueue_scan(self, side: Literal["local", "lake"], mode: Literal["full", "fast"] = "full") -> int:
+    async def enqueue_scan(self, side: Literal["local", "lake"], mode: Literal["full", "fast"] = "full", min_size_bytes: int = 0) -> int:
         """Enqueue a dedupe scan task.
         
         Args:
             side: 'local' or 'lake'
             mode: 'full' (hashed entire file) or 'fast' (partial hash)
+            min_size_bytes: Ignore files smaller than this
         """
+        import json
         now = datetime.now(timezone.utc).isoformat()
+        
+        # Serialize config to dst_side
+        config = {"mode": mode, "min_size": min_size_bytes}
+        config_str = json.dumps(config)
+        
         async with get_db() as db:
-            # We treat 'dst_side' as 'mode' for dedupe tasks to avoid schema migration
+            # We treat 'dst_side' as 'config' for dedupe tasks to avoid schema migration
             cursor = await db.execute(
                 "INSERT INTO queue (task_type, src_side, dst_side, created_at, size_bytes) VALUES ('dedupe_scan', ?, ?, ?, 0)",
-                (side, mode, now)
+                (side, config_str, now)
             )
             await db.commit()
             return cursor.lastrowid
             
-    async def execute_scan(self, task_id: int, side: Literal["local", "lake"], mode: Literal["full", "fast"] = "full") -> dict:
+    async def execute_scan(self, task_id: int, side: Literal["local", "lake"], mode: Literal["full", "fast"] = "full", min_size_bytes: int = 0) -> dict:
         """Execute a dedupe scan task (called by worker)."""
         scan_id = str(uuid.uuid4())
         now = datetime.now(timezone.utc).isoformat()
@@ -85,15 +92,15 @@ class DedupeService:
         # Update status to counting
         await broadcast("queue_progress", {"task_id": task_id, "progress_pct": 0, "message": f"Hashing ({mode})..."})
 
-        # First, hash all files that don't have hashes
+        # First, hash all files that don't have hashes (respecting min size)
         # We pass side as loop identifier, but hasher handles just that side
-        count_pending = await hasher.hash_all_pending(side, progress_callback=progress_cb, mode=mode)
+        count_pending = await hasher.hash_all_pending(side, progress_callback=progress_cb, mode=mode, min_size_bytes=min_size_bytes)
         
         # Find duplicates by grouping by hash
         async with get_db() as db:
             cursor = await db.execute(
-                "SELECT hash, COUNT(*) as cnt FROM file_index WHERE side = ? AND hash IS NOT NULL GROUP BY hash HAVING cnt > 1",
-                (side,)
+                "SELECT hash, COUNT(*) as cnt FROM file_index WHERE side = ? AND hash IS NOT NULL AND size >= ? GROUP BY hash HAVING cnt > 1",
+                (side, min_size_bytes)
             )
             dup_hashes = [row["hash"] for row in await cursor.fetchall()]
             
@@ -102,7 +109,7 @@ class DedupeService:
             
             for hash_val in dup_hashes:
                 cursor = await db.execute(
-                    "SELECT relpath, size, mtime_ns FROM file_index WHERE side = ? AND hash = ?",
+                    "SELECT relpath, size, mtime_ns FROM file_index WHERE side = ? AND hash = ?", # Hash match implies size match generally, but for safety no extra filter needed here if hash is robust
                     (side, hash_val)
                 )
                 files = await cursor.fetchall()
