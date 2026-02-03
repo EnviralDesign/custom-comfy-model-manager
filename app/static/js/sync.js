@@ -7,10 +7,27 @@ const Sync = {
     treeData: null,    // Hierarchical tree structure
     expandedFolders: new Set(),
     selectedItems: new Set(),
+    queuedFiles: new Map(),  // relpath -> {status: 'pending'|'running', taskId: n}
 
     async init() {
         this.bindEvents();
+        await this.loadQueueState();
         await this.refresh();
+    },
+
+    async loadQueueState() {
+        try {
+            const tasks = await App.api('GET', '/queue/tasks');
+            this.queuedFiles.clear();
+            for (const task of tasks) {
+                if (task.status === 'pending' || task.status === 'running') {
+                    const relpath = task.src_relpath || task.dst_relpath;
+                    this.queuedFiles.set(relpath, { status: task.status, taskId: task.id });
+                }
+            }
+        } catch (err) {
+            console.error('Failed to load queue state:', err);
+        }
     },
 
     bindEvents() {
@@ -31,6 +48,52 @@ const Sync = {
 
         // Delegate click events on the tree
         document.getElementById('diff-tree')?.addEventListener('click', (e) => this.handleTreeClick(e));
+
+        // Listen for WebSocket task started events
+        document.addEventListener('ws:task_started', async (e) => {
+            const { task_id } = e.detail;
+            // Find the relpath for this task and update status
+            await this.loadQueueState();
+            this.updateRowQueueStatus();
+        });
+
+        // Listen for WebSocket task completion events
+        let refreshDebounce;
+        document.addEventListener('ws:task_complete', async (e) => {
+            const { task_id, status } = e.detail;
+
+            // Remove from queued files
+            for (const [relpath, info] of this.queuedFiles) {
+                if (info.taskId === task_id) {
+                    this.queuedFiles.delete(relpath);
+                    break;
+                }
+            }
+
+            // Update UI immediately for the completed file
+            this.updateRowQueueStatus();
+
+            // Debounce full refresh to avoid multiple rapid re-renders
+            clearTimeout(refreshDebounce);
+            refreshDebounce = setTimeout(() => this.refreshDiff(), 500);
+
+            // Also refresh the queue panel
+            App.loadQueueTasks();
+        });
+    },
+
+    updateRowQueueStatus() {
+        // Update all rows based on queued state
+        document.querySelectorAll('.diff-row-file').forEach(row => {
+            const relpath = row.dataset.relpath;
+            const queueInfo = this.queuedFiles.get(relpath);
+
+            row.classList.remove('queue-pending', 'queue-running');
+
+            if (queueInfo) {
+                row.classList.add(`queue-${queueInfo.status}`);
+            }
+        });
     },
 
     async refresh() {
@@ -65,6 +128,31 @@ const Sync = {
                 `${stats.lake.file_count} files • ${App.formatBytes(stats.lake.total_bytes)}`;
         } catch (err) {
             console.error('Failed to load stats:', err);
+        }
+    },
+
+    /**
+     * Quick refresh - rescan files and update diff without full UI reset
+     * Preserves expanded folder state
+     */
+    async refreshDiff() {
+        try {
+            // Quick refresh of the index
+            await App.api('POST', '/index/refresh', { side: 'both' });
+
+            // Get fresh diff data
+            this.diffData = await App.api('GET', '/index/diff');
+
+            // Rebuild tree and re-render (preserves expandedFolders)
+            this.treeData = this.buildTree(this.diffData);
+            this.render(document.getElementById('search-input')?.value || '');
+
+            // Update stats
+            await this.loadStats();
+
+            console.log('Diff refreshed after task completion');
+        } catch (err) {
+            console.error('Diff refresh failed:', err);
         }
     },
 
@@ -342,17 +430,21 @@ const Sync = {
 
     async enqueueCopy(srcSide, relpath, dstSide) {
         try {
-            await App.api('POST', '/queue/copy', {
+            const result = await App.api('POST', '/queue/copy', {
                 src_side: srcSide,
                 src_relpath: relpath,
                 dst_side: dstSide,
             });
-            // Visual feedback
+
+            // Add to local tracking
+            this.queuedFiles.set(relpath, { status: 'pending', taskId: result.task_id });
+
+            // Visual feedback - add pending class
             const row = document.querySelector(`[data-relpath="${CSS.escape(relpath)}"]`);
             if (row) {
-                row.classList.add('queued');
-                setTimeout(() => row.classList.remove('queued'), 1000);
+                row.classList.add('queue-pending');
             }
+
             // Refresh queue panel
             App.loadQueueTasks();
         } catch (err) {

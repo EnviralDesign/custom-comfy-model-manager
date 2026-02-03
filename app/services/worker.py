@@ -107,10 +107,7 @@ class QueueWorker:
                 await db.commit()
             
             # Broadcast status
-            await broadcast({
-                "type": "task_started",
-                "data": {"task_id": task_id, "task_type": task["task_type"]}
-            })
+            await broadcast("task_started", {"task_id": task_id, "task_type": task["task_type"]})
             
             if task["task_type"] == "copy":
                 await self._execute_copy(task)
@@ -126,10 +123,7 @@ class QueueWorker:
                 await db.commit()
             
             # Broadcast completion
-            await broadcast({
-                "type": "task_complete",
-                "data": {"task_id": task_id, "status": "completed"}
-            })
+            await broadcast("task_complete", {"task_id": task_id, "status": "completed"})
             
         except asyncio.CancelledError:
             # Task was cancelled
@@ -157,10 +151,7 @@ class QueueWorker:
                 )
                 await db.commit()
             
-            await broadcast({
-                "type": "task_complete",
-                "data": {"task_id": task_id, "status": "failed", "error": error_msg}
-            })
+            await broadcast("task_complete", {"task_id": task_id, "status": "failed", "error": error_msg})
         
         finally:
             QueueWorker._current_task_id = None
@@ -208,19 +199,17 @@ class QueueWorker:
                     
                     # Broadcast progress (throttled to every 10%)
                     if progress_pct % 10 == 0 or bytes_copied == file_size:
-                        await broadcast({
-                            "type": "queue_progress",
-                            "data": {
-                                "task_id": task_id,
-                                "bytes_transferred": bytes_copied,
-                                "total_bytes": file_size,
-                                "progress_pct": progress_pct,
-                            }
+                        await broadcast("queue_progress", {
+                            "task_id": task_id,
+                            "bytes_transferred": bytes_copied,
+                            "total_bytes": file_size,
+                            "progress_pct": progress_pct,
                         })
         
-        # Preserve file times
+        # Preserve file times (sync call is fine, very fast)
+        import os
         src_stat = src_path.stat()
-        await aiofiles.os.utime(dst_path, (src_stat.st_atime, src_stat.st_mtime))
+        os.utime(dst_path, (src_stat.st_atime, src_stat.st_mtime))
         
         print(f"Copied: {task['src_relpath']} → {task['dst_side']}")
     

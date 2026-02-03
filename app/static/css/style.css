@@ -449,19 +449,11 @@ a:hover {
     background: var(--bg-primary);
 }
 
-.diff-row-file.queued {
-    background: rgba(99, 102, 241, 0.1);
-    animation: pulse 0.5s ease;
-}
-
-@keyframes pulse {
-    0% {
-        background: rgba(99, 102, 241, 0.3);
-    }
-
-    100% {
-        background: rgba(99, 102, 241, 0.1);
-    }
+/* File rows */
+.diff-row-file {
+    background: var(--bg-primary);
+    position: relative;
+    /* For ::before pseudo-elements */
 }
 
 .status-icon {
@@ -503,6 +495,56 @@ a:hover {
 
 .diff-row:hover .btn-copy {
     opacity: 1;
+}
+
+/* Queue status on rows */
+.diff-row-file.queue-pending {
+    background: rgba(99, 102, 241, 0.1);
+}
+
+.diff-row-file.queue-pending .btn-copy {
+    display: none;
+}
+
+.diff-row-file.queue-pending::before {
+    content: '⏳';
+    position: absolute;
+    left: 8px;
+    font-size: 12px;
+}
+
+.diff-row-file.queue-running {
+    background: rgba(34, 197, 94, 0.1);
+    animation: running-pulse 1.5s ease-in-out infinite;
+}
+
+.diff-row-file.queue-running .btn-copy {
+    display: none;
+}
+
+.diff-row-file.queue-running::before {
+    content: '⚡';
+    position: absolute;
+    left: 8px;
+    font-size: 12px;
+}
+
+@keyframes running-pulse {
+
+    0%,
+    100% {
+        background: rgba(34, 197, 94, 0.1);
+    }
+
+    50% {
+        background: rgba(34, 197, 94, 0.2);
+    }
+}
+
+/* When queued, show status indicator instead of copy button */
+.diff-row-file.queue-pending .presence-bar,
+.diff-row-file.queue-running .presence-bar {
+    background: var(--accent) !important;
 }
 
 /* Status colors on rows */
