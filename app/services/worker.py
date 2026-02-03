@@ -113,6 +113,8 @@ class QueueWorker:
                 await self._execute_copy(task)
             elif task["task_type"] == "delete":
                 await self._execute_delete(task)
+            elif task["task_type"] == "verify":
+                await self._execute_verify(task)
             
             # Mark as completed
             async with get_db() as db:
@@ -160,6 +162,7 @@ class QueueWorker:
         """Execute a copy task."""
         import blake3
         from datetime import datetime, timezone
+        import time
         
         src_root = self._get_root(task["src_side"])
         dst_root = self._get_root(task["dst_side"])
@@ -183,6 +186,7 @@ class QueueWorker:
         
         # Copy with progress and compute hash
         chunk_size = 1024 * 1024  # 1MB chunks
+        last_db_update_time = 0
         
         async with aiofiles.open(src_path, 'rb') as src_file:
             async with aiofiles.open(dst_path, 'wb') as dst_file:
@@ -197,15 +201,19 @@ class QueueWorker:
                     # Update progress in DB and broadcast
                     progress_pct = int((bytes_copied / file_size) * 100) if file_size > 0 else 100
                     
-                    async with get_db() as db:
-                        await db.execute(
-                            "UPDATE queue SET bytes_transferred = ? WHERE id = ?",
-                            (bytes_copied, task_id)
-                        )
-                        await db.commit()
+                    # Throttle DB updates to every 1 second or completion to avoid locking
+                    current_time = time.time()
+                    if current_time - last_db_update_time > 1.0 or bytes_copied == file_size:
+                        async with get_db() as db:
+                            await db.execute(
+                                "UPDATE queue SET bytes_transferred = ? WHERE id = ?",
+                                (bytes_copied, task_id)
+                            )
+                            await db.commit()
+                        last_db_update_time = current_time
                     
-                    # Broadcast progress (throttled to every 10%)
-                    if progress_pct % 10 == 0 or bytes_copied == file_size:
+                    # Broadcast progress (throttled to every 10% or completion)
+                    if (progress_pct % 10 == 0 and progress_pct > 0) or bytes_copied == file_size:
                         await broadcast("queue_progress", {
                             "task_id": task_id,
                             "bytes_transferred": bytes_copied,
@@ -256,6 +264,174 @@ class QueueWorker:
         
         await aiofiles.os.remove(filepath)
         print(f"Deleted: {task['dst_relpath']} from {task['dst_side']}")
+
+    async def _execute_verify(self, task: dict):
+        """Execute a verification task."""
+        import blake3
+        
+        task_id = task["id"]
+        relpath = task["src_relpath"]  # We reuse src_relpath for specific file
+        folder = task["verify_folder"] # We added this column
+        
+        print(f"Verifying: {relpath if relpath else folder}")
+
+        # Fetch candidate files
+        candidate_files = []
+        async with get_db() as db:
+            if relpath:
+                # Verify specific file
+                start_sql = """
+                    SELECT count(*) as count
+                    FROM file_index l
+                    JOIN file_index r ON l.relpath = r.relpath AND l.size = r.size
+                    WHERE l.side = 'local' AND r.side = 'lake'
+                    AND l.relpath = ?
+                    AND (l.hash IS NULL OR r.hash IS NULL)
+                """
+                count_cursor = await db.execute(start_sql, (relpath,))
+                
+                sql = """
+                    SELECT l.relpath, l.size, l.hash as local_hash, r.hash as lake_hash
+                    FROM file_index l
+                    JOIN file_index r ON l.relpath = r.relpath AND l.size = r.size
+                    WHERE l.side = 'local' AND r.side = 'lake'
+                    AND l.relpath = ?
+                    AND (l.hash IS NULL OR r.hash IS NULL)
+                """
+                cursor = await db.execute(sql, (relpath,))
+            else:
+                # Verify folder or all
+                if folder:
+                    folder_prefix = folder.replace("\\", "/").strip("/")
+                    start_sql = """
+                        SELECT count(*) as count
+                        FROM file_index l
+                        JOIN file_index r ON l.relpath = r.relpath AND l.size = r.size
+                        WHERE l.side = 'local' AND r.side = 'lake'
+                        AND l.relpath LIKE ?
+                        AND (l.hash IS NULL OR r.hash IS NULL)
+                    """
+                    count_cursor = await db.execute(start_sql, (f"{folder_prefix}/%",))
+                    
+                    sql = """
+                        SELECT l.relpath, l.size, l.hash as local_hash, r.hash as lake_hash
+                        FROM file_index l
+                        JOIN file_index r ON l.relpath = r.relpath AND l.size = r.size
+                        WHERE l.side = 'local' AND r.side = 'lake'
+                        AND l.relpath LIKE ?
+                        AND (l.hash IS NULL OR r.hash IS NULL)
+                    """
+                    cursor = await db.execute(sql, (f"{folder_prefix}/%",))
+                else:
+                    # Scan root
+                    start_sql = """
+                        SELECT count(*) as count
+                        FROM file_index l
+                        JOIN file_index r ON l.relpath = r.relpath AND l.size = r.size
+                        WHERE l.side = 'local' AND r.side = 'lake'
+                        AND (l.hash IS NULL OR r.hash IS NULL)
+                    """
+                    count_cursor = await db.execute(start_sql)
+                    
+                    sql = """
+                        SELECT l.relpath, l.size, l.hash as local_hash, r.hash as lake_hash
+                        FROM file_index l
+                        JOIN file_index r ON l.relpath = r.relpath AND l.size = r.size
+                        WHERE l.side = 'local' AND r.side = 'lake'
+                        AND (l.hash IS NULL OR r.hash IS NULL)
+                    """
+                    cursor = await db.execute(sql)
+            
+            # Update total size/count in DB for progress tracking
+            row_count = await count_cursor.fetchone()
+            total_files = row_count["count"]
+            
+            # Since we iterate files, let's use size_bytes as total_files for simplicity in UI
+            # or we could use bytes if we query file sizes. Let's use file count for now.
+            await db.execute(
+                "UPDATE queue SET size_bytes = ? WHERE id = ?",
+                (total_files, task_id)
+            )
+            await db.commit()
+            
+            candidate_files = await cursor.fetchall()
+        
+        # Process files
+        verified_count = 0
+        
+        for i, row in enumerate(candidate_files):
+            # Check for cancellation
+            if not QueueWorker._running: 
+                break
+                
+            file_relpath = row["relpath"]
+            local_path = self.settings.local_models_root / file_relpath.replace("/", "\\")
+            lake_path = self.settings.lake_models_root / file_relpath.replace("/", "\\")
+            
+            # Broadcast verify progress (reusing fields creatively or adding custom payload)
+            # We can use 'queue_progress' but UI needs to interpret it.
+            # verify_folder logic in UI expects 'verify_progress' event
+            if folder:
+                await broadcast("verify_progress", {
+                    "folder": folder,
+                    "current": i + 1,
+                    "total": total_files,
+                    "relpath": file_relpath
+                })
+
+            # Update queue progress
+            async with get_db() as db:
+                await db.execute(
+                    "UPDATE queue SET bytes_transferred = ? WHERE id = ?",
+                    (i + 1, task_id)
+                )
+                await db.commit()
+                
+            await broadcast("queue_progress", {
+                "task_id": task_id,
+                "bytes_transferred": i + 1,
+                "total_bytes": total_files,
+                "progress_pct": int(((i + 1) / total_files) * 100) if total_files > 0 else 100,
+            })
+            
+            try:
+                local_hash = row["local_hash"]
+                lake_hash = row["lake_hash"]
+                now = datetime.now(timezone.utc).isoformat()
+                updates = []
+                
+                if not local_hash and local_path.exists():
+                    hasher = blake3.blake3()
+                    async with aiofiles.open(local_path, 'rb') as f:
+                        while chunk := await f.read(1024 * 1024):
+                            hasher.update(chunk)
+                    local_hash = hasher.hexdigest()
+                    updates.append(("local", local_hash))
+                
+                if not lake_hash and lake_path.exists():
+                    hasher = blake3.blake3()
+                    async with aiofiles.open(lake_path, 'rb') as f:
+                        while chunk := await f.read(1024 * 1024):
+                            hasher.update(chunk)
+                    lake_hash = hasher.hexdigest()
+                    updates.append(("lake", lake_hash))
+                
+                if updates:
+                    async with get_db() as db:
+                        for side, h in updates:
+                            await db.execute(
+                                "UPDATE file_index SET hash = ?, hash_computed_at = ? WHERE side = ? AND relpath = ?",
+                                (h, now, side, file_relpath)
+                            )
+                        await db.commit()
+                
+                verified_count += 1
+                    
+            except Exception as e:
+                print(f"Failed to verify {file_relpath}: {e}")
+                continue
+        
+        print(f"Verification complete: {verified_count}/{total_files} files")
 
 
 # Convenience functions

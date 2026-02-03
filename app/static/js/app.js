@@ -106,9 +106,9 @@ const App = {
 
             return `
             <div class="queue-item queue-item-${task.status}" data-task-id="${task.id}">
-                <span class="queue-icon">${task.task_type === 'copy' ? '📋' : '🗑️'}</span>
+                <span class="queue-icon">${task.task_type === 'copy' ? '📋' : (task.task_type === 'verify' ? '🔍' : '🗑️')}</span>
                 <div class="queue-info">
-                    <div class="queue-path">${this.truncatePath(task.src_relpath || task.dst_relpath)}</div>
+                    <div class="queue-path">${this.truncatePath(task.src_relpath || task.dst_relpath || task.verify_folder)}</div>
                     <div class="queue-meta">
                         ${isRunning
                     ? `⚡ ${progress}% • ${this.formatBytes(task.bytes_transferred || 0)} / ${this.formatBytes(task.size_bytes)}`

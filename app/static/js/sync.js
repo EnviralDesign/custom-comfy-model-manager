@@ -80,6 +80,29 @@ const Sync = {
             // Also refresh the queue panel
             App.loadQueueTasks();
         });
+
+        // Listen for WebSocket verify progress
+        document.addEventListener('ws:verify_progress', (e) => {
+            const { folder, current, total } = e.detail;
+            if (!folder) return;
+
+            // Update folder button
+            // Use CSS.escape for the selector but handle the folder path correctly
+            // The folder path acts as an ID, so we need to be careful with selectors
+            try {
+                // We use querySelectorAll and filter because standard querySelector might choke on paths with special chars
+                const buttons = document.querySelectorAll(`button[data-action="verify-folder"]`);
+                for (const btn of buttons) {
+                    if (btn.dataset.folder === folder) {
+                        btn.textContent = `${current}/${total}`;
+                        btn.disabled = true;
+                        break;
+                    }
+                }
+            } catch (err) {
+                console.error('Error updating progress:', err);
+            }
+        });
     },
 
     updateRowQueueStatus() {
@@ -247,7 +270,7 @@ const Sync = {
                         <span class="folder-icon">📁</span>
                         <span class="folder-name">${folderName}</span>
                         <span class="folder-count">(${itemCount})</span>
-                        ${showVerify ? `<button class="btn-verify" data-action="verify-folder" data-folder="${folderPath}" title="Verify hashes for this folder">✓?</button>` : ''}
+                        ${showVerify ? `<button class="btn-verify" data-action="verify-folder" data-folder="${folderPath}" title="Verify hashes for this folder" style="margin-left: auto">✓?</button>` : ''}
                     </div>
                     <div class="diff-col diff-col-lake">
                         <span class="presence-bar ${folderStatus.lake === 'has-files' ? 'present' : 'absent'}"></span>
@@ -425,38 +448,43 @@ const Sync = {
     async verifyFolder(folderPath) {
         const btn = document.querySelector(`[data-action="verify-folder"][data-folder="${CSS.escape(folderPath)}"]`);
         if (btn) {
-            btn.textContent = '⏳';
+            btn.textContent = 'Queueing...';
             btn.disabled = true;
         }
 
         try {
-            const result = await App.api('POST', '/index/verify', { folder: folderPath });
-            console.log(`Verified ${result.verified} files: ${result.matched} matched, ${result.mismatched} mismatched`);
-
-            // Refresh to show updated status
-            await this.refreshDiff();
+            await App.api('POST', '/index/verify', { folder: folderPath });
+            // The queue poller will pick it up and update the button/queue panel
+            if (btn) btn.textContent = 'Queued';
+            App.loadQueueTasks();
         } catch (err) {
             console.error('Verify failed:', err);
-            alert('Verification failed: ' + err.message);
+            alert('Verification request failed: ' + err.message);
+            if (btn) {
+                btn.textContent = '✓?';
+                btn.disabled = false;
+            }
         }
     },
 
     async verifyFile(relpath) {
         const btn = document.querySelector(`[data-action="verify-file"][data-relpath="${CSS.escape(relpath)}"]`);
         if (btn) {
-            btn.textContent = '⏳';
+            btn.textContent = '...';
             btn.disabled = true;
         }
 
         try {
-            const result = await App.api('POST', '/index/verify', { relpath: relpath });
-            console.log(`Verified: ${result.matched} matched, ${result.mismatched} mismatched`);
-
-            // Refresh to show updated status
-            await this.refreshDiff();
+            await App.api('POST', '/index/verify', { relpath: relpath });
+            if (btn) btn.textContent = 'Queued';
+            App.loadQueueTasks();
         } catch (err) {
             console.error('Verify failed:', err);
-            alert('Verification failed: ' + err.message);
+            alert('Verification request failed: ' + err.message);
+            if (btn) {
+                btn.textContent = '✓?';
+                btn.disabled = false;
+            }
         }
     },
 

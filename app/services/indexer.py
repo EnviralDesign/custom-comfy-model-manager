@@ -26,7 +26,6 @@ class IndexerService:
         """
         root = self._get_root(side)
         now = datetime.now(timezone.utc).isoformat()
-        count = 0
         
         # Collect all files
         files_data = []
@@ -45,52 +44,56 @@ class IndexerService:
                         "mtime_ns": stat.st_mtime_ns,
                         "indexed_at": now,
                     })
-                    count += 1
                 except (OSError, ValueError):
                     # Skip files we can't access
                     continue
         
+        # Fetch existing hashes before deleting
+        existing_hashes = {}
+        async with get_db() as db:
+            cursor = await db.execute(
+                "SELECT relpath, size, mtime_ns, hash, hash_computed_at FROM file_index WHERE side = ? AND hash IS NOT NULL",
+                (side,)
+            )
+            rows = await cursor.fetchall()
+            for row in rows:
+                key = (row["relpath"], row["size"], row["mtime_ns"])
+                existing_hashes[key] = (row["hash"], row["hash_computed_at"])
+        
+        # Prepare values for bulk insert
+        insert_values = []
+        for f in files_data:
+            key = (f["relpath"], f["size"], f["mtime_ns"])
+            if key in existing_hashes:
+                # Reuse existing hash
+                h, h_at = existing_hashes[key]
+                insert_values.append((
+                    f["side"], f["relpath"], f["size"], f["mtime_ns"], 
+                    h, h_at, f["indexed_at"]
+                ))
+            else:
+                # New file
+                insert_values.append((
+                    f["side"], f["relpath"], f["size"], f["mtime_ns"], 
+                    None, None, f["indexed_at"]
+                ))
+        
+        # Update DB in a single valid transaction
         async with get_db() as db:
             # Clear old entries for this side
             await db.execute("DELETE FROM file_index WHERE side = ?", (side,))
             
-            # Insert all new entries
-            # Preserve hash if size+mtime unchanged
-            for f in files_data:
-                # Check if we have an existing hash that's still valid
-                cursor = await db.execute(
-                    """
-                    SELECT hash, hash_computed_at 
-                    FROM file_index 
-                    WHERE side = ? AND relpath = ? AND size = ? AND mtime_ns = ?
-                    """,
-                    (f["side"], f["relpath"], f["size"], f["mtime_ns"])
-                )
-                existing = await cursor.fetchone()
-                
-                if existing and existing["hash"]:
-                    # Reuse existing hash
-                    await db.execute(
-                        """
-                        INSERT INTO file_index (side, relpath, size, mtime_ns, hash, hash_computed_at, indexed_at)
-                        VALUES (?, ?, ?, ?, ?, ?, ?)
-                        """,
-                        (f["side"], f["relpath"], f["size"], f["mtime_ns"], 
-                         existing["hash"], existing["hash_computed_at"], f["indexed_at"])
-                    )
-                else:
-                    # New file, no hash yet
-                    await db.execute(
-                        """
-                        INSERT INTO file_index (side, relpath, size, mtime_ns, indexed_at)
-                        VALUES (?, ?, ?, ?, ?)
-                        """,
-                        (f["side"], f["relpath"], f["size"], f["mtime_ns"], f["indexed_at"])
-                    )
-            
+            # Batch insert
+            await db.executemany(
+                """
+                INSERT INTO file_index (side, relpath, size, mtime_ns, hash, hash_computed_at, indexed_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                insert_values
+            )
             await db.commit()
         
-        return count
+        return len(insert_values)
     
     async def get_files(
         self, 
