@@ -555,8 +555,8 @@ a:hover {
     position: fixed;
     bottom: 0;
     right: 20px;
-    width: 400px;
-    max-height: 300px;
+    width: 420px;
+    max-height: 350px;
     background: var(--bg-secondary);
     border: 1px solid var(--border);
     border-bottom: none;
@@ -565,6 +565,7 @@ a:hover {
     overflow: hidden;
     transform: translateY(calc(100% - 44px));
     transition: transform 0.3s;
+    z-index: 200;
 }
 
 .queue-panel.expanded {
@@ -578,22 +579,99 @@ a:hover {
     padding: 12px 16px;
     background: var(--bg-tertiary);
     cursor: pointer;
+    user-select: none;
+}
+
+.queue-header h3 {
+    font-size: 14px;
+    font-weight: 500;
+    margin: 0;
+}
+
+.queue-controls {
+    display: flex;
+    gap: 6px;
 }
 
 .queue-list {
-    max-height: 256px;
+    max-height: 280px;
     overflow-y: auto;
     padding: 8px;
+}
+
+.empty-queue {
+    padding: 24px;
+    text-align: center;
+    color: var(--text-muted);
+    font-size: 13px;
 }
 
 .queue-item {
     display: flex;
     align-items: center;
-    gap: 12px;
-    padding: 10px;
+    gap: 10px;
+    padding: 10px 12px;
     background: var(--bg-tertiary);
     border-radius: var(--radius-sm);
     margin-bottom: 6px;
+}
+
+.queue-item:last-child {
+    margin-bottom: 0;
+}
+
+.queue-item-running {
+    border-left: 3px solid var(--accent);
+    background: rgba(99, 102, 241, 0.1);
+}
+
+.queue-item-pending {
+    border-left: 3px solid var(--text-muted);
+}
+
+.queue-icon {
+    font-size: 16px;
+    flex-shrink: 0;
+}
+
+.queue-info {
+    flex: 1;
+    min-width: 0;
+}
+
+.queue-path {
+    font-size: 12px;
+    font-family: var(--font-mono);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.queue-meta {
+    font-size: 11px;
+    color: var(--text-muted);
+    margin-top: 2px;
+}
+
+.queue-item .btn-cancel {
+    opacity: 0;
+    background: transparent;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    color: var(--text-muted);
+    cursor: pointer;
+    padding: 4px 6px;
+    font-size: 10px;
+    transition: all 0.15s;
+}
+
+.queue-item:hover .btn-cancel {
+    opacity: 1;
+}
+
+.queue-item .btn-cancel:hover {
+    color: var(--danger);
+    border-color: var(--danger);
 }
 
 /* ========== Dedupe Layout ========== */

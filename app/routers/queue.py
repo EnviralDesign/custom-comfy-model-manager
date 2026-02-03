@@ -48,6 +48,13 @@ async def get_queue():
     return await queue_service.get_all_tasks()
 
 
+@router.get("/tasks", response_model=list[QueueTask])
+async def get_tasks():
+    """Get all queue tasks (alias for /)."""
+    queue_service = QueueService()
+    return await queue_service.get_all_tasks()
+
+
 @router.get("/active", response_model=QueueTask | None)
 async def get_active_task():
     """Get the currently running task, if any."""

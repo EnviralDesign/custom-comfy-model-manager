@@ -142,6 +142,9 @@ const Sync = {
                 <div class="diff-row diff-row-folder" data-path="${folderPath}" data-depth="${depth}">
                     <div class="diff-col diff-col-local">
                         <span class="folder-status ${folderStatus.local}">${folderStatus.localIcon}</span>
+                        ${folderStatus.local === 'has-files' && folderStatus.lake === 'no-files' ?
+                    `<button class="btn-icon btn-copy" data-action="sync-folder-to-lake" data-folder="${folderPath}" title="Copy folder to Lake →">→</button>` :
+                    (folderStatus.hasOnlyLocal ? `<button class="btn-icon btn-copy" data-action="sync-folder-to-lake" data-folder="${folderPath}" title="Copy missing to Lake →">→</button>` : '')}
                     </div>
                     <div class="diff-col diff-col-path">
                         <span class="tree-indent" style="width: ${depth * 20}px"></span>
@@ -153,6 +156,9 @@ const Sync = {
                         <span class="folder-count">(${itemCount})</span>
                     </div>
                     <div class="diff-col diff-col-lake">
+                        ${folderStatus.lake === 'has-files' && folderStatus.local === 'no-files' ?
+                    `<button class="btn-icon btn-copy" data-action="sync-folder-to-local" data-folder="${folderPath}" title="← Copy folder to Local">←</button>` :
+                    (folderStatus.hasOnlyLake ? `<button class="btn-icon btn-copy" data-action="sync-folder-to-local" data-folder="${folderPath}" title="← Copy missing to Local">←</button>` : '')}
                         <span class="folder-status ${folderStatus.lake}">${folderStatus.lakeIcon}</span>
                     </div>
                 </div>
@@ -209,13 +215,14 @@ const Sync = {
     },
 
     getFolderStatus(node) {
-        let hasLocal = false, hasLake = false, hasConflict = false;
+        let hasLocal = false, hasLake = false, hasOnlyLocal = false, hasOnlyLake = false;
 
         const checkNode = (n) => {
             for (const file of n.files) {
-                if (file.status === 'conflict') hasConflict = true;
                 if (file.local_size !== null) hasLocal = true;
                 if (file.lake_size !== null) hasLake = true;
+                if (file.status === 'only_local') hasOnlyLocal = true;
+                if (file.status === 'only_lake') hasOnlyLake = true;
             }
             for (const child of Object.values(n.children)) {
                 checkNode(child);
@@ -228,6 +235,8 @@ const Sync = {
             lake: hasLake ? 'has-files' : 'no-files',
             localIcon: hasLocal ? '●' : '○',
             lakeIcon: hasLake ? '●' : '○',
+            hasOnlyLocal,
+            hasOnlyLake,
         };
     },
 
@@ -267,15 +276,23 @@ const Sync = {
     handleTreeClick(e) {
         const target = e.target;
 
-        // Folder toggle
-        if (target.classList.contains('folder-toggle') || target.closest('.folder-toggle')) {
-            const toggle = target.classList.contains('folder-toggle') ? target : target.closest('.folder-toggle');
-            const folderPath = toggle.dataset.folder;
+        // Folder toggle (clicking the arrow)
+        if (target.classList.contains('folder-toggle')) {
+            const folderPath = target.dataset.folder;
             this.toggleFolder(folderPath);
             return;
         }
 
-        // Copy buttons
+        // Folder sync buttons
+        if (target.dataset.action === 'sync-folder-to-lake' || target.dataset.action === 'sync-folder-to-local') {
+            const folderPath = target.dataset.folder;
+            const srcSide = target.dataset.action === 'sync-folder-to-lake' ? 'local' : 'lake';
+            const dstSide = target.dataset.action === 'sync-folder-to-lake' ? 'lake' : 'local';
+            this.enqueueFolderCopy(srcSide, folderPath, dstSide);
+            return;
+        }
+
+        // File copy buttons
         if (target.dataset.action === 'copy-to-lake' || target.dataset.action === 'copy-to-local') {
             const relpath = target.dataset.relpath;
             const srcSide = target.dataset.action === 'copy-to-lake' ? 'local' : 'lake';
@@ -323,13 +340,49 @@ const Sync = {
                 dst_side: dstSide,
             });
             // Visual feedback
-            const row = document.querySelector(`[data-relpath="${relpath}"]`);
+            const row = document.querySelector(`[data-relpath="${CSS.escape(relpath)}"]`);
             if (row) {
                 row.classList.add('queued');
                 setTimeout(() => row.classList.remove('queued'), 1000);
             }
+            // Refresh queue panel
+            App.loadQueueTasks();
         } catch (err) {
             alert('Copy failed: ' + err.message);
+        }
+    },
+
+    async enqueueFolderCopy(srcSide, folderPath, dstSide) {
+        // Find all files in this folder that need copying
+        const filesToCopy = this.diffData.filter(entry => {
+            if (!entry.relpath.startsWith(folderPath + '/') && entry.relpath !== folderPath) return false;
+            // Only copy files that exist on source but not destination
+            if (srcSide === 'local' && entry.status === 'only_local') return true;
+            if (srcSide === 'lake' && entry.status === 'only_lake') return true;
+            return false;
+        });
+
+        if (filesToCopy.length === 0) {
+            alert('No files to copy in this folder');
+            return;
+        }
+
+        const confirmed = confirm(`Copy ${filesToCopy.length} files from ${srcSide} to ${dstSide}?`);
+        if (!confirmed) return;
+
+        try {
+            for (const file of filesToCopy) {
+                await App.api('POST', '/queue/copy', {
+                    src_side: srcSide,
+                    src_relpath: file.relpath,
+                    dst_side: dstSide,
+                });
+            }
+            // Refresh queue panel
+            App.loadQueueTasks();
+            alert(`${filesToCopy.length} files queued for copy`);
+        } catch (err) {
+            alert('Folder copy failed: ' + err.message);
         }
     }
 };
