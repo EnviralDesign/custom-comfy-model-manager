@@ -229,6 +229,7 @@ const Sync = {
             // Determine if sync buttons should show
             const showSyncToLake = folderStatus.hasOnlyLocal;
             const showSyncToLocal = folderStatus.hasOnlyLake;
+            const showVerify = folderStatus.hasProbableSame;
 
             html += `
                 <div class="diff-row diff-row-folder" data-path="${folderPath}" data-depth="${depth}">
@@ -246,6 +247,7 @@ const Sync = {
                         <span class="folder-icon">📁</span>
                         <span class="folder-name">${folderName}</span>
                         <span class="folder-count">(${itemCount})</span>
+                        ${showVerify ? `<button class="btn-verify" data-action="verify-folder" data-folder="${folderPath}" title="Verify hashes for this folder">✓?</button>` : ''}
                     </div>
                     <div class="diff-col diff-col-lake">
                         <span class="presence-bar ${folderStatus.lake === 'has-files' ? 'present' : 'absent'}"></span>
@@ -273,6 +275,7 @@ const Sync = {
             const statusIcon = this.getStatusIcon(file.status);
             const hasLocal = file.local_size !== null;
             const hasLake = file.lake_size !== null;
+            const isProbableSame = file.status === 'probable_same';
 
             // Check if file is in queue
             const queueInfo = this.queuedFiles.get(file.relpath);
@@ -291,6 +294,7 @@ const Sync = {
                         <span class="tree-indent" style="width: ${depth * 20}px"></span>
                         <span class="status-icon ${statusClass}" title="${this.getStatusTooltip(file.status)}">${statusIcon}</span>
                         <span class="file-name" title="${file.relpath}">${file.filename}</span>
+                        ${isProbableSame ? `<button class="btn-verify btn-verify-file" data-action="verify-file" data-relpath="${file.relpath}" title="Verify hash">✓?</button>` : ''}
                     </div>
                     <div class="diff-col diff-col-lake">
                         <span class="presence-bar ${hasLake ? 'present' : 'absent'}"></span>
@@ -315,7 +319,7 @@ const Sync = {
     },
 
     getFolderStatus(node) {
-        let hasLocal = false, hasLake = false, hasOnlyLocal = false, hasOnlyLake = false;
+        let hasLocal = false, hasLake = false, hasOnlyLocal = false, hasOnlyLake = false, hasProbableSame = false;
 
         const checkNode = (n) => {
             for (const file of n.files) {
@@ -323,6 +327,7 @@ const Sync = {
                 if (file.lake_size !== null) hasLake = true;
                 if (file.status === 'only_local') hasOnlyLocal = true;
                 if (file.status === 'only_lake') hasOnlyLake = true;
+                if (file.status === 'probable_same') hasProbableSame = true;
             }
             for (const child of Object.values(n.children)) {
                 checkNode(child);
@@ -337,6 +342,7 @@ const Sync = {
             lakeIcon: hasLake ? '●' : '○',
             hasOnlyLocal,
             hasOnlyLake,
+            hasProbableSame,
         };
     },
 
@@ -399,6 +405,58 @@ const Sync = {
             const dstSide = target.dataset.action === 'copy-to-lake' ? 'lake' : 'local';
             this.enqueueCopy(srcSide, relpath, dstSide);
             return;
+        }
+
+        // Verify folder button
+        if (target.dataset.action === 'verify-folder') {
+            const folderPath = target.dataset.folder;
+            this.verifyFolder(folderPath);
+            return;
+        }
+
+        // Verify file button
+        if (target.dataset.action === 'verify-file') {
+            const relpath = target.dataset.relpath;
+            this.verifyFile(relpath);
+            return;
+        }
+    },
+
+    async verifyFolder(folderPath) {
+        const btn = document.querySelector(`[data-action="verify-folder"][data-folder="${CSS.escape(folderPath)}"]`);
+        if (btn) {
+            btn.textContent = '⏳';
+            btn.disabled = true;
+        }
+
+        try {
+            const result = await App.api('POST', '/index/verify', { folder: folderPath });
+            console.log(`Verified ${result.verified} files: ${result.matched} matched, ${result.mismatched} mismatched`);
+
+            // Refresh to show updated status
+            await this.refreshDiff();
+        } catch (err) {
+            console.error('Verify failed:', err);
+            alert('Verification failed: ' + err.message);
+        }
+    },
+
+    async verifyFile(relpath) {
+        const btn = document.querySelector(`[data-action="verify-file"][data-relpath="${CSS.escape(relpath)}"]`);
+        if (btn) {
+            btn.textContent = '⏳';
+            btn.disabled = true;
+        }
+
+        try {
+            const result = await App.api('POST', '/index/verify', { relpath: relpath });
+            console.log(`Verified: ${result.matched} matched, ${result.mismatched} mismatched`);
+
+            // Refresh to show updated status
+            await this.refreshDiff();
+        } catch (err) {
+            console.error('Verify failed:', err);
+            alert('Verification failed: ' + err.message);
         }
     },
 

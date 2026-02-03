@@ -497,6 +497,51 @@ a:hover {
     opacity: 1;
 }
 
+/* Verify button */
+.btn-verify {
+    background: transparent;
+    border: 1px solid var(--state-warn);
+    color: var(--state-warn);
+    border-radius: var(--radius-sm);
+    padding: 0 6px;
+    height: 20px;
+    font-size: 11px;
+    cursor: pointer;
+    margin-left: 8px;
+    opacity: 0.7;
+    transition: all 0.15s;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.btn-verify:hover {
+    background: var(--state-warn);
+    color: var(--bg-primary);
+    opacity: 1;
+}
+
+.btn-verify:disabled {
+    border-color: var(--text-muted);
+    color: var(--text-muted);
+    cursor: wait;
+    background: transparent;
+}
+
+.btn-verify-file {
+    margin-left: 8px;
+    opacity: 0;
+    /* Hide by default on files */
+}
+
+.diff-row:hover .btn-verify-file {
+    opacity: 0.7;
+}
+
+.diff-row:hover .btn-verify-file:hover {
+    opacity: 1;
+}
+
 /* Queue status on rows */
 .diff-row-file.queue-pending {
     background: rgba(99, 102, 241, 0.1);
