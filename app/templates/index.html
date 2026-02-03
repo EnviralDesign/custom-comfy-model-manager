@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ComfyUI Model Manager</title>
+    <meta name="description" content="Manage your ComfyUI models library - sync between Local and Lake storage">
+    <link rel="stylesheet" href="/static/css/style.css">
+    <script src="/static/js/htmx.min.js"></script>
+</head>
+<body>
+    <nav class="top-bar">
+        <div class="logo">
+            <span class="logo-icon">⚡</span>
+            <span class="logo-text">ComfyUI Model Manager</span>
+        </div>
+        <div class="nav-links">
+            <a href="/sync" class="nav-link {% if request.url.path == '/sync' %}active{% endif %}">Sync</a>
+            <a href="/dedupe" class="nav-link {% if request.url.path == '/dedupe' %}active{% endif %}">Dedupe</a>
+        </div>
+        <div class="nav-actions">
+            <div id="queue-widget" class="queue-widget">
+                <span class="queue-icon">📋</span>
+                <span class="queue-count">0</span>
+            </div>
+        </div>
+    </nav>
+    <main>
+        {% block content %}
+        <div class="welcome-screen">
+            <h1>Welcome to ComfyUI Model Manager</h1>
+            <p>Manage your models library across Local and Lake storage.</p>
+            <div class="action-cards">
+                <a href="/sync" class="action-card">
+                    <div class="card-icon">🔄</div>
+                    <h2>Sync</h2>
+                    <p>Browse and sync files between Local and Lake</p>
+                </a>
+                <a href="/dedupe" class="action-card">
+                    <div class="card-icon">🧹</div>
+                    <h2>Dedupe</h2>
+                    <p>Find and remove duplicate files</p>
+                </a>
+            </div>
+        </div>
+        {% endblock %}
+    </main>
+    <script src="/static/js/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,102 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Dedupe - ComfyUI Model Manager</title>
+    <link rel="stylesheet" href="/static/css/style.css">
+    <script src="/static/js/htmx.min.js"></script>
+</head>
+
+<body>
+    <nav class="top-bar">
+        <div class="logo">
+            <span class="logo-icon">⚡</span>
+            <span class="logo-text">ComfyUI Model Manager</span>
+        </div>
+        <div class="nav-links">
+            <a href="/sync" class="nav-link">Sync</a>
+            <a href="/dedupe" class="nav-link active">Dedupe</a>
+        </div>
+        <div class="nav-actions">
+            <div id="queue-widget" class="queue-widget">
+                <span class="queue-icon">📋</span>
+                <span class="queue-count">0</span>
+            </div>
+        </div>
+    </nav>
+
+    <main class="dedupe-layout">
+        <div class="dedupe-container">
+            <!-- Side Selection -->
+            <div class="dedupe-step" id="step-select">
+                <h2>Select Side to Scan</h2>
+                <p>Choose which storage location to scan for duplicate files.</p>
+                <div class="side-buttons">
+                    <button class="btn btn-large" id="scan-local">
+                        📁 Scan Local
+                    </button>
+                    <button class="btn btn-large" id="scan-lake">
+                        🌊 Scan Lake
+                    </button>
+                </div>
+            </div>
+
+            <!-- Scanning Progress -->
+            <div class="dedupe-step hidden" id="step-scanning">
+                <h2>Scanning for Duplicates...</h2>
+                <div class="progress-bar">
+                    <div class="progress-fill" id="scan-progress"></div>
+                </div>
+                <p id="scan-status">Hashing files...</p>
+            </div>
+
+            <!-- Results / Wizard -->
+            <div class="dedupe-step hidden" id="step-wizard">
+                <div class="wizard-header">
+                    <h2>Duplicate Groups</h2>
+                    <span class="wizard-progress">Group <span id="current-group">1</span> of <span
+                            id="total-groups">0</span></span>
+                </div>
+
+                <div class="duplicate-group" id="current-duplicate-group">
+                    <!-- Filled by JS -->
+                </div>
+
+                <div class="wizard-nav">
+                    <button class="btn" id="prev-group" disabled>← Previous</button>
+                    <button class="btn btn-primary" id="next-group">Next →</button>
+                </div>
+            </div>
+
+            <!-- Review & Confirm -->
+            <div class="dedupe-step hidden" id="step-review">
+                <h2>Review Deletions</h2>
+                <div class="review-summary">
+                    <p><strong>Files to delete:</strong> <span id="delete-count">0</span></p>
+                    <p><strong>Space to reclaim:</strong> <span id="reclaim-size">0 MB</span></p>
+                </div>
+                <div class="review-warning">
+                    ⚠️ This action is permanent. Files will be hard-deleted.
+                </div>
+                <div class="review-actions">
+                    <button class="btn" id="back-to-wizard">← Back</button>
+                    <button class="btn btn-danger" id="confirm-delete">Delete Files</button>
+                </div>
+            </div>
+
+            <!-- Complete -->
+            <div class="dedupe-step hidden" id="step-complete">
+                <h2>✅ Deduplication Complete</h2>
+                <p id="complete-message"></p>
+                <button class="btn btn-primary" id="start-over">Start Over</button>
+            </div>
+        </div>
+    </main>
+
+    <script src="/static/js/app.js"></script>
+    <script src="/static/js/dedupe.js"></script>
+</body>
+
+</html>

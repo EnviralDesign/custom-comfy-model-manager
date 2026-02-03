@@ -1,0 +1,86 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Sync - ComfyUI Model Manager</title>
+    <link rel="stylesheet" href="/static/css/style.css">
+    <script src="/static/js/htmx.min.js"></script>
+</head>
+
+<body>
+    <nav class="top-bar">
+        <div class="logo">
+            <span class="logo-icon">⚡</span>
+            <span class="logo-text">ComfyUI Model Manager</span>
+        </div>
+        <div class="nav-links">
+            <a href="/sync" class="nav-link active">Sync</a>
+            <a href="/dedupe" class="nav-link">Dedupe</a>
+        </div>
+        <div class="nav-actions">
+            <input type="text" id="search-input" class="search-input" placeholder="Search files...">
+            <button id="refresh-btn" class="btn btn-secondary" hx-post="/api/index/refresh" hx-swap="none">
+                🔄 Refresh
+            </button>
+            <div id="queue-widget" class="queue-widget">
+                <span class="queue-icon">📋</span>
+                <span class="queue-count">0</span>
+            </div>
+        </div>
+    </nav>
+
+    <main class="sync-layout">
+        <!-- Left Pane: Local -->
+        <div class="pane local-pane">
+            <div class="pane-header">
+                <h2>📁 Local</h2>
+                <span class="pane-path" title="{{ local_root }}">{{ local_root }}</span>
+                <div class="pane-stats" id="local-stats"></div>
+            </div>
+            <div class="folder-tree" id="local-folders"></div>
+            <div class="file-list" id="local-files"></div>
+        </div>
+
+        <!-- Center: Actions -->
+        <div class="action-column">
+            <div class="action-buttons">
+                <button class="btn btn-primary" id="copy-to-lake" disabled title="Copy selected to Lake">
+                    →
+                </button>
+                <button class="btn btn-primary" id="copy-to-local" disabled title="Copy selected to Local">
+                    ←
+                </button>
+            </div>
+        </div>
+
+        <!-- Right Pane: Lake -->
+        <div class="pane lake-pane">
+            <div class="pane-header">
+                <h2>🌊 Lake</h2>
+                <span class="pane-path" title="{{ lake_root }}">{{ lake_root }}</span>
+                <div class="pane-stats" id="lake-stats"></div>
+            </div>
+            <div class="folder-tree" id="lake-folders"></div>
+            <div class="file-list" id="lake-files"></div>
+        </div>
+    </main>
+
+    <!-- Queue Panel -->
+    <div class="queue-panel" id="queue-panel">
+        <div class="queue-header">
+            <h3>Transfer Queue</h3>
+            <div class="queue-controls">
+                <button class="btn btn-small" id="pause-queue">⏸️</button>
+                <button class="btn btn-small" id="resume-queue">▶️</button>
+            </div>
+        </div>
+        <div class="queue-list" id="queue-list"></div>
+    </div>
+
+    <script src="/static/js/app.js"></script>
+    <script src="/static/js/sync.js"></script>
+</body>
+
+</html>
