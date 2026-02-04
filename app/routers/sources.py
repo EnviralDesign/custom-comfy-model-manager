@@ -1,10 +1,13 @@
 """API Router for Source URL Management (Hash -> URL metadata)."""
 
 from datetime import datetime, timezone
+import json
+from urllib.parse import urlparse, unquote
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
-from typing import Optional
+from typing import Optional, Any
 
+from app.config import get_settings
 from app.services.source_manager import get_source_manager, ModelSource
 from app.database import get_db
 
@@ -14,42 +17,107 @@ import requests
 router = APIRouter()
 
 
+def check_url_sync(url: str) -> dict:
+    try:
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+        }
+        response = requests.head(url, allow_redirects=True, timeout=10, headers=headers)
+
+        # If 404 or other error, or if Content-Length is missing (some sites block HEAD), try GET
+        if response.status_code != 200 or not response.headers.get("Content-Length"):
+            response = requests.get(url, stream=True, timeout=10, headers=headers)
+
+        size = response.headers.get("Content-Length")
+        content_type = response.headers.get("Content-Type", "").lower()
+
+        # Heuristic: if it's text/html, it's likely a landing page, not a direct download
+        is_webpage = "text/html" in content_type
+
+        return {
+            "ok": response.status_code == 200 and not is_webpage,
+            "status": response.status_code,
+            "size": int(size) if size else None,
+            "type": content_type,
+            "url": response.url,
+            "is_webpage": is_webpage,
+        }
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+def _extract_response_text(payload: dict) -> str:
+    if not payload:
+        return ""
+    if isinstance(payload.get("output_text"), str):
+        return payload.get("output_text", "")
+
+    # OpenAI-style Responses API output
+    output = payload.get("output", [])
+    if isinstance(output, list):
+        text_parts = []
+        for item in output:
+            if item.get("type") != "message":
+                continue
+            for part in item.get("content", []):
+                part_type = part.get("type")
+                if part_type in ("output_text", "text"):
+                    text_parts.append(part.get("text", ""))
+        if text_parts:
+            return "\n".join(text_parts)
+
+    # Chat completions fallback
+    choices = payload.get("choices")
+    if isinstance(choices, list) and choices:
+        message = choices[0].get("message", {})
+        if isinstance(message, dict):
+            return message.get("content", "")
+
+    return ""
+
+
+def _extract_json_object(text: str) -> Optional[dict]:
+    if not text:
+        return None
+    cleaned = text.strip()
+    if cleaned.startswith("```"):
+        cleaned = cleaned.strip("`")
+        cleaned = cleaned.replace("json", "", 1).strip()
+    try:
+        return json.loads(cleaned)
+    except Exception:
+        start = cleaned.find("{")
+        end = cleaned.rfind("}")
+        if start != -1 and end != -1 and end > start:
+            snippet = cleaned[start:end + 1]
+            try:
+                return json.loads(snippet)
+            except Exception:
+                return None
+    return None
+
+
+def _url_basename(url: str) -> str:
+    try:
+        path = urlparse(url).path
+        return unquote(path.rsplit("/", 1)[-1])
+    except Exception:
+        return ""
+
+
+def _filename_matches_url(filename: str, url: str) -> bool:
+    if not filename or not url:
+        return False
+    return _url_basename(url) == filename
+
+
 @router.get("/check-url")
 async def check_url(url: str):
     """
     Check if a URL is valid and reachable.
     Returns status code and file size if available.
     """
-    def _check():
-        try:
-            # Try HEAD first (fast)
-            headers = {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
-            }
-            response = requests.head(url, allow_redirects=True, timeout=10, headers=headers)
-            
-            # If 404 or other error, or if Content-Length is missing (some sites block HEAD), try GET
-            if response.status_code != 200 or not response.headers.get("Content-Length"):
-                response = requests.get(url, stream=True, timeout=10, headers=headers)
-            
-            size = response.headers.get("Content-Length")
-            content_type = response.headers.get("Content-Type", "").lower()
-            
-            # Heuristic: if it's text/html, it's likely a landing page, not a direct download
-            is_webpage = "text/html" in content_type
-            
-            return {
-                "ok": response.status_code == 200 and not is_webpage,
-                "status": response.status_code,
-                "size": int(size) if size else None,
-                "type": content_type,
-                "url": response.url,
-                "is_webpage": is_webpage
-            }
-        except Exception as e:
-            return {"ok": False, "error": str(e)}
-            
-    return await run_in_threadpool(_check)
+    return await run_in_threadpool(check_url_sync, url)
 
 
 class SourceURLRequest(BaseModel):
@@ -66,6 +134,141 @@ class SourceURLResponse(BaseModel):
     notes: Optional[str] = None
     filename_hint: Optional[str] = None
     relpath: Optional[str] = None  # Set if this is a relpath-based entry
+
+
+class AiSourceLookupRequest(BaseModel):
+    filename: str
+    relpath: Optional[str] = None
+
+
+class AiSourceLookupResponse(BaseModel):
+    found: bool
+    accepted: bool
+    url: Optional[str] = None
+    filename: str
+    reason: Optional[str] = None
+    validation: Optional[dict[str, Any]] = None
+    model: Optional[str] = None
+
+
+@router.post("/sources/ai-lookup", response_model=AiSourceLookupResponse)
+async def ai_lookup_source_url(request: AiSourceLookupRequest):
+    """
+    Use xAI Grok (with web search) to find a direct download URL for an exact filename.
+    """
+    settings = get_settings()
+    api_key = settings.xai_api_key
+    if not api_key:
+        raise HTTPException(status_code=400, detail="XAI_API_KEY is not configured")
+
+    filename = request.filename.strip()
+    if not filename:
+        raise HTTPException(status_code=400, detail="filename is required")
+
+    def _lookup() -> AiSourceLookupResponse:
+        model = settings.xai_model
+        base_url = settings.xai_api_base_url.rstrip("/")
+
+        system_prompt = (
+            "You are a web research assistant. Your task is to find a public direct download URL "
+            "for the exact file name provided. Start with Hugging Face and Civitai, but if no exact "
+            "match is found you may search elsewhere. Only return a URL if the filename matches "
+            "exactly (case-sensitive) and points to a direct file download (not a landing page). "
+            "If you cannot find an exact match, return found=false and url=null. "
+            "Return ONLY a JSON object with keys: found (boolean), url (string|null), source (string|null), notes (string|null)."
+        )
+        user_prompt = f"File name: {filename}\nPath: {request.relpath or ''}"
+
+        payload = {
+            "model": model,
+            "input": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            "tools": [{"type": "web_search"}],
+            "temperature": 0.2,
+            "max_output_tokens": 500,
+            "store": False,
+        }
+
+        try:
+            response = requests.post(
+                f"{base_url}/v1/responses",
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json",
+                },
+                json=payload,
+                timeout=60,
+            )
+        except Exception as exc:
+            return AiSourceLookupResponse(
+                found=False,
+                accepted=False,
+                url=None,
+                filename=filename,
+                reason=f"xAI request failed: {exc}",
+                model=model,
+            )
+
+        if response.status_code >= 400:
+            return AiSourceLookupResponse(
+                found=False,
+                accepted=False,
+                url=None,
+                filename=filename,
+                reason=f"xAI error {response.status_code}: {response.text}",
+                model=model,
+            )
+
+        data = response.json()
+        text = _extract_response_text(data)
+        result = _extract_json_object(text) or {}
+        candidate_url = (result.get("url") or "").strip()
+        found = bool(result.get("found")) and bool(candidate_url)
+
+        if not found:
+            return AiSourceLookupResponse(
+                found=False,
+                accepted=False,
+                url=None,
+                filename=filename,
+                reason="No exact filename match found",
+                model=model,
+            )
+
+        if not _filename_matches_url(filename, candidate_url):
+            return AiSourceLookupResponse(
+                found=False,
+                accepted=False,
+                url=None,
+                filename=filename,
+                reason="Candidate URL filename does not match exactly",
+                model=model,
+            )
+
+        validation = check_url_sync(candidate_url)
+        if not validation.get("ok"):
+            return AiSourceLookupResponse(
+                found=True,
+                accepted=False,
+                url=None,
+                filename=filename,
+                reason="Candidate URL failed validation",
+                validation=validation,
+                model=model,
+            )
+
+        return AiSourceLookupResponse(
+            found=True,
+            accepted=True,
+            url=candidate_url,
+            filename=filename,
+            validation=validation,
+            model=model,
+        )
+
+    return await run_in_threadpool(_lookup)
 
 
 @router.get("/sources/{file_hash}", response_model=SourceURLResponse | None)

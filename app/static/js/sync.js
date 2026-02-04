@@ -10,6 +10,7 @@ const Sync = {
     queuedFiles: new Map(),  // relpath -> {status: 'pending'|'running', taskId: n}
     sourceUrls: new Map(),   // hash -> {url, added_at, notes}
     bundles: [],             // List of bundle names for quick add
+    activeSourceContext: null,
 
     async init() {
         this.bindEvents();
@@ -862,11 +863,13 @@ const Sync = {
                         <label for="source-url-input">Public Web URL:</label>
                         <input type="url" id="source-url-input" class="modal-input" placeholder="https://huggingface.co/model-org/model-name/resolve/main/model.safetensors" />
                         <div id="url-test-result" style="margin-top: -8px; margin-bottom: 12px; font-size: 12px; display: none;"></div>
+                        <div id="ai-lookup-result" class="ai-lookup-result"></div>
                         <p class="modal-hint">Enter the public download URL for this model. This allows remote provisioning to download directly from the source.</p>
                         <p class="modal-hash-hint"></p>
                     </div>
                     <div class="modal-footer">
                         <button class="btn btn-danger" id="source-url-delete" style="margin-right: auto;">Delete</button>
+                        <button class="btn btn-ai" id="source-url-ai">✨ Find URL</button>
                         <button class="btn" id="source-url-test">🔍 Test Link</button>
                         <button class="btn" onclick="Sync.closeSourceUrlModal()">Cancel</button>
                         <button class="btn btn-primary" id="source-url-save">Save</button>
@@ -888,6 +891,7 @@ const Sync = {
         const existing = existingByHash || existingByRelpath;
 
         // Populate modal
+        this.activeSourceContext = { filename, relpath, hash };
         modal.querySelector('.modal-filename').textContent = `File: ${filename}`;
         modal.querySelector('.modal-hash').textContent = hasHash ? `Hash: ${hash}` : `Path: ${relpath}`;
         modal.querySelector('#source-url-input').value = existing?.url || '';
@@ -919,9 +923,72 @@ const Sync = {
         testResult.style.display = 'none';
         testBtn.onclick = () => this.testSourceUrl();
 
+        // Bind AI lookup
+        const aiBtn = modal.querySelector('#source-url-ai');
+        const aiResult = modal.querySelector('#ai-lookup-result');
+        if (aiResult) {
+            aiResult.style.display = 'none';
+            aiResult.textContent = '';
+        }
+        if (aiBtn) {
+            aiBtn.disabled = false;
+            aiBtn.textContent = '✨ Find URL';
+            aiBtn.onclick = () => this.findSourceUrlWithAI();
+        }
+
         // Show modal
         modal.classList.add('visible');
         modal.querySelector('#source-url-input').focus();
+    },
+
+    async findSourceUrlWithAI() {
+        const context = this.activeSourceContext;
+        if (!context?.filename) return;
+
+        const input = document.getElementById('source-url-input');
+        const resultDiv = document.getElementById('ai-lookup-result');
+        const aiBtn = document.getElementById('source-url-ai');
+
+        if (!input || !resultDiv || !aiBtn) return;
+
+        aiBtn.disabled = true;
+        aiBtn.textContent = '✨ Searching...';
+        resultDiv.style.display = 'block';
+        resultDiv.style.color = 'var(--text-muted)';
+        resultDiv.textContent = 'Searching the web with Grok...';
+
+        try {
+            const res = await App.api('POST', '/index/sources/ai-lookup', {
+                filename: context.filename,
+                relpath: context.relpath || '',
+            });
+
+            if (res.accepted && res.url) {
+                input.value = res.url;
+                resultDiv.style.color = 'var(--success)';
+                const sizeStr = res.validation?.size
+                    ? ` (${(res.validation.size / (1024 * 1024)).toFixed(1)} MB)`
+                    : '';
+                const statusStr = res.validation?.status ? `HTTP ${res.validation.status}` : 'validated';
+                resultDiv.textContent = `✅ Found exact match and validated (${statusStr}${sizeStr}).`;
+                return;
+            }
+
+            if (!res.found) {
+                resultDiv.style.color = 'var(--text-muted)';
+                resultDiv.textContent = res.reason || 'No exact filename match found.';
+                return;
+            }
+
+            resultDiv.style.color = 'var(--warning)';
+            resultDiv.textContent = res.reason || 'Candidate URL failed validation.';
+        } catch (err) {
+            resultDiv.style.color = 'var(--danger)';
+            resultDiv.textContent = `❌ ${err.message}`;
+        } finally {
+            aiBtn.disabled = false;
+            aiBtn.textContent = '✨ Find URL';
+        }
     },
 
     async testSourceUrl() {
@@ -969,6 +1036,7 @@ const Sync = {
         if (modal) {
             modal.classList.remove('visible');
         }
+        this.activeSourceContext = null;
     },
 
     async saveSourceUrl(hash, relpath, filename) {
