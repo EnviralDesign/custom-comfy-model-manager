@@ -152,28 +152,6 @@ const Sync = {
             App.loadQueueTasks();
         });
 
-        // Listen for WebSocket verify progress
-        document.addEventListener('ws:verify_progress', (e) => {
-            const { folder, current, total } = e.detail;
-            if (!folder) return;
-
-            // Update folder button
-            // Use CSS.escape for the selector but handle the folder path correctly
-            // The folder path acts as an ID, so we need to be careful with selectors
-            try {
-                // We use querySelectorAll and filter because standard querySelector might choke on paths with special chars
-                const buttons = document.querySelectorAll(`button[data-action="verify-folder"]`);
-                for (const btn of buttons) {
-                    if (btn.dataset.folder === folder) {
-                        btn.textContent = `${current}/${total}`;
-                        btn.disabled = true;
-                        break;
-                    }
-                }
-            } catch (err) {
-                console.error('Error updating progress:', err);
-            }
-        });
     },
 
     updateRowQueueStatus() {
@@ -181,13 +159,63 @@ const Sync = {
         document.querySelectorAll('.diff-row-file').forEach(row => {
             const relpath = row.dataset.relpath;
             const queueInfo = this.queuedFiles.get(relpath);
+            const status = queueInfo ? queueInfo.status : null;
 
             row.classList.remove('queue-pending', 'queue-running');
+            if (status) row.classList.add(`queue-${status}`);
 
-            if (queueInfo) {
-                row.classList.add(`queue-${queueInfo.status}`);
+            this.updateBadge(row, status);
+        });
+
+        // Update all folders based on their content
+        document.querySelectorAll('.diff-row-folder').forEach(row => {
+            const folderPath = row.dataset.path;
+            const node = this.findNodeByPath(folderPath);
+            if (node) {
+                const status = this.getFolderQueueStatus(node);
+                row.classList.remove('queue-pending', 'queue-running');
+                if (status) row.classList.add(`queue-${status}`);
+
+                this.updateBadge(row, status);
             }
         });
+    },
+
+    updateBadge(row, status) {
+        const leftGroup = row.querySelector('.left-group');
+        if (!leftGroup) return;
+
+        let badge = leftGroup.querySelector('.queue-badge');
+        if (status) {
+            if (!badge) {
+                badge = document.createElement('span');
+                badge.className = 'queue-badge';
+                leftGroup.appendChild(badge);
+            }
+            badge.textContent = status === 'running' ? '⚡' : '⏳';
+            badge.title = status === 'running' ? 'Running' : 'Pending';
+        } else {
+            if (badge) badge.remove();
+        }
+    },
+
+    findNodeByPath(path) {
+        if (!path) return null;
+        const parts = path.split('/');
+        let current = this.treeData;
+
+        // Handle root files if any (path would be empty string for root, but usually folders have names)
+        // If path is just a file in root, this logic refers to folders.
+        // Paths match what's in dataset.path.
+
+        for (const part of parts) {
+            if (current && current.children && current.children[part]) {
+                current = current.children[part];
+            } else {
+                return null;
+            }
+        }
+        return current;
     },
 
     handleCopyComplete(relpath, srcSide, dstSide) {
@@ -366,6 +394,7 @@ const Sync = {
 
             // Get folder diff status
             const folderStatus = this.getFolderStatus(folder);
+            const folderQueueStatus = this.getFolderQueueStatus(folder);
             const folderHashStats = this.getFolderHashStats(folder);
 
             // If filtering, check if folder contains matching items
@@ -377,8 +406,6 @@ const Sync = {
             // Determine if sync buttons should show
             const showSyncToLake = folderStatus.hasOnlyLocal;
             const showSyncToLocal = folderStatus.hasOnlyLake;
-            const showVerify = folderStatus.hasProbableSame;
-
             const emptyMetrics = folderMetrics.total === 0;
             const hashComplete = folderMetrics.total > 0 && folderMetrics.hashed === folderMetrics.total;
             const linkComplete = folderMetrics.total > 0 && folderMetrics.linked === folderMetrics.total;
@@ -394,10 +421,15 @@ const Sync = {
                 ? `<button class="btn-hash-folder" data-action="hash-folder" data-folder="${folderPath}" title="${folderHashStats.missing > 0 ? `Queue hash for ${folderHashStats.missing} file(s) in this folder` : 'All files already hashed'}">#️⃣</button>`
                 : '';
 
+            const queueBadgeHtml = this.getQueueBadgeHtml(folderQueueStatus);
+
             html += `
-                <div class="diff-row diff-row-folder" data-path="${folderPath}" data-depth="${depth}">
+                <div class="diff-row diff-row-folder ${folderQueueStatus ? 'queue-' + folderQueueStatus : ''}" data-path="${folderPath}" data-depth="${depth}">
                     <div class="diff-col diff-col-local">
-                        ${this.config.local_allow_delete && folderStatus.local !== 'absent' ? `<button class="btn-icon btn-delete" data-action="delete-folder" data-side="local" data-folder="${folderPath}" title="Delete all in folder from Local">🗑️</button>` : ''}
+                        <div class="left-group">
+                            ${this.config.local_allow_delete ? `<span class="btn-slot">${folderStatus.local !== 'absent' ? `<button class="btn-icon btn-delete" data-action="delete-folder" data-side="local" data-folder="${folderPath}" title="Delete all in folder from Local">🗑️</button>` : ''}</span>` : ''}
+                            ${queueBadgeHtml}
+                        </div>
                         <span class="btn-slot">
                             ${showSyncToLake ? `<button class="btn-icon btn-copy" data-action="sync-folder-to-lake" data-folder="${folderPath}" title="Copy ${folderStatus.onlyLocalCount || ''} to Lake →">→</button>` : ''}
                         </span>
@@ -412,7 +444,6 @@ const Sync = {
                         <span class="folder-name">${folderName}</span>
                         ${metricsHtml}
                         <div class="path-actions">
-                            ${showVerify ? `<button class="btn-verify" data-action="verify-folder" data-folder="${folderPath}" title="Verify hashes for this folder">✓?</button>` : ''}
                             ${hashFolderBtn}
                             <button class="btn-ai-lookup" data-action="ai-lookup-folder" data-folder="${folderPath}" title="AI lookup source URLs for this folder">✨</button>
                             <button class="btn-add-bundle" data-action="add-folder-to-bundle" data-folder="${folderPath}" title="Add all in folder to bundle">📦</button>
@@ -445,7 +476,6 @@ const Sync = {
             const statusIcon = this.getStatusIcon(file.status);
             const hasLocal = file.local_size !== null;
             const hasLake = file.lake_size !== null;
-            const isProbableSame = file.status === 'probable_same';
 
             // Check if file is in queue
             const queueInfo = this.queuedFiles.get(file.relpath);
@@ -460,19 +490,24 @@ const Sync = {
             const hasSourceUrlByRelpath = this.sourceUrlsByRelpath?.has(file.relpath);
             const hasSourceUrl = hasSourceUrlByHash || hasSourceUrlByRelpath;
 
-            // Hash button - shows on unhashed files (on lake side which is the archive)
-            const hashBtn = (!hasHash && hasLake)
-                ? `<button class="btn-hash-file" data-action="hash-file" data-relpath="${file.relpath}" title="Compute hash for this file">#️⃣</button>`
+            const needsHash = (hasLocal && !file.local_hash) || (hasLake && !file.lake_hash);
+            const hashBtn = needsHash
+                ? `<button class="btn-hash-file" data-action="hash-file" data-relpath="${file.relpath}" title="${hasLocal && hasLake ? 'Hash & compare' : 'Compute hash'}">#️⃣</button>`
                 : '';
 
             // URL and Bundle buttons
             const sourceUrlBtn = `<button class="btn-source-url ${hasSourceUrl ? 'has-url' : ''}" data-action="source-url" data-hash="${fileHash || ''}" data-relpath="${file.relpath}" data-filename="${file.filename}" title="${hasSourceUrl ? 'Edit source URL' : 'Add source URL'}">🔗</button>`;
             const bundleBtn = `<button class="btn-add-bundle" data-action="add-to-bundle" data-hash="${fileHash || ''}" data-relpath="${file.relpath}" data-filename="${file.filename}" title="Add to bundle">📦</button>`;
 
+            const queueBadgeHtml = this.getQueueBadgeHtml(queueInfo ? queueInfo.status : null);
+
             html += `
                 <div class="diff-row diff-row-file ${statusClass} ${queueClass}" data-relpath="${file.relpath}" data-depth="${depth}" draggable="true">
                     <div class="diff-col diff-col-local">
-                        ${this.config.local_allow_delete && hasLocal && !queueInfo ? `<button class="btn-icon btn-delete" data-action="delete-file" data-side="local" data-relpath="${file.relpath}" title="Delete from Local">🗑️</button>` : ''}
+                        <div class="left-group">
+                            ${this.config.local_allow_delete ? `<span class="btn-slot">${hasLocal && !queueInfo ? `<button class="btn-icon btn-delete" data-action="delete-file" data-side="local" data-relpath="${file.relpath}" title="Delete from Local">🗑️</button>` : ''}</span>` : ''}
+                            ${queueBadgeHtml}
+                        </div>
                         <span class="file-size">${hasLocal ? App.formatBytes(file.local_size) : ''}</span>
                         <span class="btn-slot">
                             ${hasLocal && !hasLake && !queueInfo ? `<button class="btn-icon btn-copy" data-action="copy-to-lake" data-relpath="${file.relpath}" title="Copy to Lake →">→</button>` : ''}
@@ -487,7 +522,6 @@ const Sync = {
                             ${this.renderSafetensorsTags(file, hasLocal, hasLake)}
                         </div>
                         <div class="path-actions">
-                            ${isProbableSame ? `<button class="btn-verify btn-verify-file" data-action="verify-file" data-relpath="${file.relpath}" title="Verify hash">✓?</button>` : ''}
                             ${hashBtn}
                             ${sourceUrlBtn}
                             ${bundleBtn}
@@ -550,8 +584,8 @@ const Sync = {
         const visit = (n) => {
             for (const file of n.files) {
                 total += 1;
-                const fileHash = file.lake_hash || file.local_hash;
-                if (!fileHash) missing += 1;
+                const needsHash = (file.local_size !== null && !file.local_hash) || (file.lake_size !== null && !file.lake_hash);
+                if (needsHash) missing += 1;
             }
             for (const child of Object.values(n.children)) {
                 visit(child);
@@ -696,6 +730,32 @@ const Sync = {
         };
     },
 
+    getFolderQueueStatus(node) {
+        let hasPending = false;
+        let hasRunning = false;
+
+        const checkNode = (n) => {
+            for (const file of n.files) {
+                const queueInfo = this.queuedFiles.get(file.relpath);
+                if (queueInfo) {
+                    if (queueInfo.status === 'running') hasRunning = true;
+                    if (queueInfo.status === 'pending') hasPending = true;
+                }
+            }
+            if (hasRunning) return;
+
+            for (const child of Object.values(n.children)) {
+                checkNode(child);
+                if (hasRunning) return;
+            }
+        };
+        checkNode(node);
+
+        if (hasRunning) return 'running';
+        if (hasPending) return 'pending';
+        return null;
+    },
+
     getStatusClass(status) {
         const map = {
             'only_local': 'status-only-local',
@@ -724,9 +784,16 @@ const Sync = {
             'only_lake': 'Only on Lake',
             'same': 'Identical (hash verified)',
             'probable_same': 'Probably same (size+mtime match, hash pending)',
-            'conflict': 'CONFLICT: Same path, different content!',
+            'conflict': 'CONFLICT: Same path, different size or hash!',
         };
         return map[status] || status;
+    },
+
+    getQueueBadgeHtml(status) {
+        if (!status) return '';
+        const icon = status === 'running' ? '⚡' : '⏳';
+        const title = status === 'running' ? 'Running' : 'Pending';
+        return `<span class="queue-badge" title="${title}">${icon}</span>`;
     },
 
     handleTreeClick(e) {
@@ -773,24 +840,10 @@ const Sync = {
             return;
         }
 
-        // Verify folder button
-        if (target.dataset.action === 'verify-folder') {
-            const folderPath = target.dataset.folder;
-            this.verifyFolder(folderPath);
-            return;
-        }
-
         // Hash folder button
         if (target.dataset.action === 'hash-folder') {
             const folderPath = target.dataset.folder || '';
             this.enqueueFolderHash(folderPath);
-            return;
-        }
-
-        // Verify file button
-        if (target.dataset.action === 'verify-file') {
-            const relpath = target.dataset.relpath;
-            this.verifyFile(relpath);
             return;
         }
 
@@ -858,12 +911,11 @@ const Sync = {
             if (folderPath) {
                 if (!(entry.relpath === folderPath || entry.relpath.startsWith(prefix))) return false;
             }
-            const fileHash = entry.lake_hash || entry.local_hash;
-            return !fileHash;
+            return (entry.local_size !== null && !entry.local_hash) || (entry.lake_size !== null && !entry.lake_hash);
         });
 
         if (candidates.length === 0) {
-            alert('No unhashed files found in this folder.');
+            alert('No files need hashing in this folder.');
             return;
         }
 
@@ -884,49 +936,6 @@ const Sync = {
         } catch (err) {
             console.error('Failed to queue folder hash:', err);
             alert('Failed to queue folder hash: ' + err.message);
-        }
-    },
-
-    async verifyFolder(folderPath) {
-        const btn = document.querySelector(`[data-action="verify-folder"][data-folder="${CSS.escape(folderPath)}"]`);
-        if (btn) {
-            btn.textContent = 'Queueing...';
-            btn.disabled = true;
-        }
-
-        try {
-            await App.api('POST', '/index/verify', { folder: folderPath });
-            // The queue poller will pick it up and update the button/queue panel
-            if (btn) btn.textContent = 'Queued';
-            App.loadQueueTasks();
-        } catch (err) {
-            console.error('Verify failed:', err);
-            alert('Verification request failed: ' + err.message);
-            if (btn) {
-                btn.textContent = '✓?';
-                btn.disabled = false;
-            }
-        }
-    },
-
-    async verifyFile(relpath) {
-        const btn = document.querySelector(`[data-action="verify-file"][data-relpath="${CSS.escape(relpath)}"]`);
-        if (btn) {
-            btn.textContent = '...';
-            btn.disabled = true;
-        }
-
-        try {
-            await App.api('POST', '/index/verify', { relpath: relpath });
-            if (btn) btn.textContent = 'Queued';
-            App.loadQueueTasks();
-        } catch (err) {
-            console.error('Verify failed:', err);
-            alert('Verification request failed: ' + err.message);
-            if (btn) {
-                btn.textContent = '✓?';
-                btn.disabled = false;
-            }
         }
     },
 

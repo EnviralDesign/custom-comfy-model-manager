@@ -397,6 +397,7 @@ a:hover {
 /* Folder rows */
 .diff-row-folder {
     background: var(--bg-secondary);
+    position: relative;
 }
 
 .diff-row-folder:hover {
@@ -651,35 +652,53 @@ a:hover {
 }
 
 /* Queue status on rows */
-.diff-row-file.queue-pending {
-    background: rgba(99, 102, 241, 0.1);
+/* Queue status on rows */
+.diff-row.queue-pending {
+    background: rgba(99, 102, 241, 0.1) !important;
 }
 
-.diff-row-file.queue-pending .btn-copy {
+.diff-row.queue-pending .btn-copy {
     display: none;
 }
 
-.diff-row-file.queue-pending::before {
-    content: '⏳';
-    position: absolute;
-    left: 8px;
-    font-size: 12px;
-}
-
-.diff-row-file.queue-running {
-    background: rgba(34, 197, 94, 0.1);
+.diff-row.queue-running {
+    background: rgba(34, 197, 94, 0.1) !important;
     animation: running-pulse 1.5s ease-in-out infinite;
 }
 
-.diff-row-file.queue-running .btn-copy {
+.diff-row.queue-running .btn-copy {
     display: none;
 }
 
-.diff-row-file.queue-running::before {
-    content: '⚡';
-    position: absolute;
-    left: 8px;
-    font-size: 12px;
+/* Layout for left column items (Delete btn + Badge) */
+.left-group {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-right: auto;
+    /* Ensure space is reserved even if empty to push content right? No, standard flex logic */
+}
+
+.queue-badge {
+    font-size: 14px;
+    animation: fadeIn 0.3s ease-out;
+}
+
+@keyframes fadeIn {
+    from {
+        opacity: 0;
+        transform: scale(0.8);
+    }
+
+    to {
+        opacity: 1;
+        transform: scale(1);
+    }
+}
+
+/* Reset delete button margin as it's now inside left-group */
+.diff-col-local .btn-delete {
+    margin-right: 0;
 }
 
 @keyframes running-pulse {

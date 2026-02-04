@@ -31,7 +31,7 @@ async def compute_diff(
     - only_lake: file exists only on Lake  
     - same: both exist and hashes match
     - probable_same: both exist, hashes pending, but size+mtime match
-    - conflict: both exist but hashes differ (yellow warning!)
+    - conflict: both exist but hashes differ, or sizes differ
     """
     async with get_db() as db:
         # Build query conditions
@@ -104,7 +104,9 @@ async def compute_diff(
                     status = "conflict"
             else:
                 # At least one hash pending - check size+mtime
-                if local["size"] == lake["size"] and local["mtime_ns"] == lake["mtime_ns"]:
+                if local["size"] != lake["size"]:
+                    status = "conflict"
+                elif local["size"] == lake["size"] and local["mtime_ns"] == lake["mtime_ns"]:
                     status = "probable_same"
                 else:
                     # Different size/mtime and no hashes - could be conflict
