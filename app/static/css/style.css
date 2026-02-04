@@ -979,6 +979,26 @@ a:hover {
     border-color: var(--danger);
 }
 
+.queue-section {
+    margin-bottom: 12px;
+}
+
+.queue-section:last-child {
+    margin-bottom: 0;
+}
+
+.queue-section-title {
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.12em;
+    color: var(--text-muted);
+    margin: 4px 8px 8px;
+}
+
+.download-item .queue-path {
+    font-weight: 500;
+}
+
 /* ========== Dedupe Layout ========== */
 .dedupe-layout {
     display: flex;
@@ -1185,6 +1205,35 @@ a:hover {
     opacity: 1 !important;
     background: #8b5cf6;
     border-color: #8b5cf6;
+    color: white;
+}
+
+/* ========== Folder Download Button ========== */
+.btn-folder-download {
+    background: transparent;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    color: var(--text-muted);
+    width: 24px;
+    height: 20px;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 12px;
+    margin-left: 6px;
+    opacity: 0;
+    transition: all 0.15s;
+}
+
+.diff-row:hover .btn-folder-download {
+    opacity: 0.5;
+}
+
+.btn-folder-download:hover {
+    opacity: 1 !important;
+    background: var(--accent);
+    border-color: var(--accent);
     color: white;
 }
 

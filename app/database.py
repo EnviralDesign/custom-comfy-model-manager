@@ -83,6 +83,19 @@ CREATE TABLE IF NOT EXISTS source_urls (
 CREATE INDEX IF NOT EXISTS idx_source_urls_key ON source_urls(key);
 CREATE INDEX IF NOT EXISTS idx_source_urls_relpath ON source_urls(relpath) WHERE relpath IS NOT NULL;
 
+-- Safetensors classification cache
+CREATE TABLE IF NOT EXISTS safetensors_cache (
+    key TEXT PRIMARY KEY,  -- side:relpath
+    side TEXT NOT NULL CHECK (side IN ('local', 'lake')),
+    relpath TEXT NOT NULL,
+    size INTEGER NOT NULL,
+    mtime_ns INTEGER NOT NULL,
+    payload_json TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_safetensors_cache_relpath ON safetensors_cache(relpath);
+
 -- AI lookup jobs: background Grok web search and review workflow
 CREATE TABLE IF NOT EXISTS ai_lookup_jobs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,

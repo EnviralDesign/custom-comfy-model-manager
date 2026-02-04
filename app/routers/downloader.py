@@ -7,6 +7,7 @@ from pydantic import BaseModel, Field, HttpUrl
 from typing import Optional
 
 from app.services.downloader import get_download_manager
+from app.config import get_settings
 
 router = APIRouter()
 
@@ -38,7 +39,13 @@ class DownloadStartRequest(BaseModel):
     force: bool = True
 
 
-@router.post("/api/downloader/jobs", response_model=DownloadJobResponse)
+class DownloadToFolderRequest(BaseModel):
+    url: HttpUrl
+    folder_relpath: str = ""
+    start_now: bool = False
+
+
+@router.post("/downloader/jobs", response_model=DownloadJobResponse)
 async def create_download_job(request: DownloadRequest):
     manager = get_download_manager()
     job = manager.create_job(
@@ -51,13 +58,41 @@ async def create_download_job(request: DownloadRequest):
     return DownloadJobResponse(**job.to_dict())
 
 
-@router.get("/api/downloader/jobs", response_model=list[DownloadJobResponse])
+@router.post("/downloader/jobs/to-folder", response_model=DownloadJobResponse)
+async def create_download_job_to_folder(request: DownloadToFolderRequest):
+    settings = get_settings()
+    folder_relpath = request.folder_relpath.strip().replace("\\", "/")
+
+    if ".." in folder_relpath or folder_relpath.startswith("/"):
+        raise HTTPException(status_code=400, detail="Invalid folder path")
+
+    target_root = settings.local_models_root.resolve()
+    dest_dir = (target_root / folder_relpath).resolve() if folder_relpath else target_root
+
+    if not str(dest_dir).startswith(str(target_root)):
+        raise HTTPException(status_code=400, detail="Invalid folder path")
+
+    manager = get_download_manager()
+    job = manager.create_job(
+        url=str(request.url),
+        filename=None,
+        provider="auto",
+        api_key_override=None,
+        start_now=request.start_now,
+        dest_dir=dest_dir,
+        target_root=target_root,
+        record_source=True,
+    )
+    return DownloadJobResponse(**job.to_dict())
+
+
+@router.get("/downloader/jobs", response_model=list[DownloadJobResponse])
 async def list_download_jobs():
     manager = get_download_manager()
     return [DownloadJobResponse(**job.to_dict()) for job in manager.list_jobs()]
 
 
-@router.post("/api/downloader/jobs/{job_id}/start")
+@router.post("/downloader/jobs/{job_id}/start")
 async def start_download_job(job_id: int, request: DownloadStartRequest):
     manager = get_download_manager()
     if not manager.start_job(job_id, force=request.force):
@@ -65,7 +100,7 @@ async def start_download_job(job_id: int, request: DownloadStartRequest):
     return {"status": "started", "force": request.force}
 
 
-@router.post("/api/downloader/jobs/{job_id}/cancel")
+@router.post("/downloader/jobs/{job_id}/cancel")
 async def cancel_download_job(job_id: int):
     manager = get_download_manager()
     if not manager.cancel_job(job_id):
@@ -73,7 +108,7 @@ async def cancel_download_job(job_id: int):
     return {"status": "cancelled"}
 
 
-@router.post("/api/downloader/jobs/cancel-all")
+@router.post("/downloader/jobs/cancel-all")
 async def cancel_all_download_jobs():
     manager = get_download_manager()
     cancelled = manager.cancel_all()

@@ -5,6 +5,7 @@ from pydantic import BaseModel
 from typing import Literal
 from datetime import datetime
 from pathlib import Path
+import json
 
 from app.services.indexer import IndexerService
 from app.services.differ import compute_diff, DiffEntry
@@ -14,6 +15,8 @@ from app.services.safetensors import (
     classify_safetensors_header,
 )
 from app.config import get_settings
+from app.database import get_db
+from starlette.concurrency import run_in_threadpool
 
 router = APIRouter()
 
@@ -188,6 +191,7 @@ async def get_safetensors_header(
 async def classify_safetensors(
     relpath: str = Query(...),
     side: Literal["local", "lake", "auto"] = "auto",
+    force: bool = False,
 ):
     """
     Classify a .safetensors file using header heuristics.
@@ -195,8 +199,51 @@ async def classify_safetensors(
     chosen_side, file_path = _resolve_safetensors_path(relpath, side)
 
     try:
-        header = read_safetensors_header(file_path)
+        stat = file_path.stat()
+        cache_key = f"{chosen_side}:{relpath}"
+
+        if not force:
+            async with get_db() as db:
+                cursor = await db.execute(
+                    "SELECT size, mtime_ns, payload_json FROM safetensors_cache WHERE key = ?",
+                    (cache_key,),
+                )
+                row = await cursor.fetchone()
+                if row and row["size"] == stat.st_size and row["mtime_ns"] == stat.st_mtime_ns:
+                    payload = json.loads(row["payload_json"])
+                    return {
+                        "relpath": relpath,
+                        "side": chosen_side,
+                        **payload,
+                    }
+
+        header = await run_in_threadpool(read_safetensors_header, file_path)
         result = classify_safetensors_header(header, relpath=relpath)
+        payload = {
+            "tags": result.get("tags", []),
+            "confidence": result.get("confidence", 0.0),
+            "signals": result.get("signals", []),
+            "signals_by_tag": result.get("signals_by_tag", {}),
+        }
+
+        async with get_db() as db:
+            await db.execute(
+                """
+                INSERT OR REPLACE INTO safetensors_cache
+                (key, side, relpath, size, mtime_ns, payload_json, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    cache_key,
+                    chosen_side,
+                    relpath,
+                    stat.st_size,
+                    stat.st_mtime_ns,
+                    json.dumps(payload),
+                    datetime.now().isoformat(),
+                ),
+            )
+            await db.commit()
     except SafetensorsHeaderError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     except Exception as exc:
@@ -205,7 +252,78 @@ async def classify_safetensors(
     return {
         "relpath": relpath,
         "side": chosen_side,
-        **result,
+        **payload,
+    }
+
+
+@router.post("/safetensors/reclassify")
+async def reclassify_safetensors_all():
+    """
+    Recalculate classifications for all indexed .safetensors files.
+    """
+    settings = get_settings()
+    total = 0
+    updated = 0
+    errors = 0
+
+    async with get_db() as db:
+        await db.execute("DELETE FROM safetensors_cache")
+        await db.commit()
+        cursor = await db.execute(
+            "SELECT side, relpath FROM file_index WHERE relpath LIKE '%.safetensors'"
+        )
+        rows = await cursor.fetchall()
+
+    for row in rows:
+        side_name = row["side"]
+        relpath = row["relpath"]
+        total += 1
+
+        root = settings.local_models_root if side_name == "local" else settings.lake_models_root
+        file_path = (root / relpath).resolve()
+        if not file_path.exists():
+            errors += 1
+            continue
+
+        try:
+            stat = file_path.stat()
+            header = await run_in_threadpool(read_safetensors_header, file_path)
+            result = classify_safetensors_header(header, relpath=relpath)
+            payload = {
+                "tags": result.get("tags", []),
+                "confidence": result.get("confidence", 0.0),
+                "signals": result.get("signals", []),
+                "signals_by_tag": result.get("signals_by_tag", {}),
+            }
+            cache_key = f"{side_name}:{relpath}"
+            async with get_db() as db:
+                await db.execute(
+                    """
+                    INSERT OR REPLACE INTO safetensors_cache
+                    (key, side, relpath, size, mtime_ns, payload_json, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        cache_key,
+                        side_name,
+                        relpath,
+                        stat.st_size,
+                        stat.st_mtime_ns,
+                        json.dumps(payload),
+                        datetime.now().isoformat(),
+                    ),
+                )
+                await db.commit()
+            updated += 1
+        except Exception:
+            errors += 1
+            continue
+
+    return {
+        "status": "completed",
+        "total": total,
+        "updated": updated,
+        "errors": errors,
     }
 
 

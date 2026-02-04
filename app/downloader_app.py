@@ -31,6 +31,6 @@ async def downloader_page(request: Request):
     })
 
 
-app.include_router(downloader_router.router)
+app.include_router(downloader_router.router, prefix="/api", tags=["downloader"])
 app.include_router(agent_debug_router.router)
 app.include_router(agent_tools_router.router)

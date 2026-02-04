@@ -160,12 +160,14 @@ from app.routers import queue as queue_router
 from app.routers import dedupe as dedupe_router
 from app.routers import sources as sources_router
 from app.routers import bundles as bundles_router
+from app.routers import downloader as downloader_router
 
 app.include_router(index_router.router, prefix="/api/index", tags=["index"])
 app.include_router(queue_router.router, prefix="/api/queue", tags=["queue"])
 app.include_router(dedupe_router.router, prefix="/api/dedupe", tags=["dedupe"])
 app.include_router(sources_router.router, prefix="/api/index", tags=["sources"])
 app.include_router(bundles_router.router, prefix="/api", tags=["bundles"])
+app.include_router(downloader_router.router, prefix="/api", tags=["downloader"])
 from app.routers import ai_lookup as ai_lookup_router
 app.include_router(ai_lookup_router.router, prefix="/api/ai", tags=["ai-lookup"])
 

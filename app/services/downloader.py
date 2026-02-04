@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import threading
 import time
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from urllib.parse import unquote, urlparse
@@ -12,6 +14,8 @@ from urllib.parse import unquote, urlparse
 import requests
 
 from app.config import get_settings
+from app.database import get_db
+from app.services.source_manager import ModelSource, get_source_manager
 
 
 def _now_iso() -> str:
@@ -75,6 +79,8 @@ class DownloadJob:
     attempts: int = 0
     dest_path: Path | None = None
     temp_path: Path | None = None
+    target_root: Path | None = None
+    record_source: bool = False
     api_key_override: str | None = None
     cancelled: bool = False
     force_start: bool = False
@@ -152,6 +158,9 @@ class DownloadManager:
         provider: str | None = None,
         api_key_override: str | None = None,
         start_now: bool = False,
+        dest_dir: Path | None = None,
+        target_root: Path | None = None,
+        record_source: bool = False,
     ) -> DownloadJob:
         settings = get_settings()
         downloads_dir = settings.get_downloads_dir()
@@ -163,7 +172,8 @@ class DownloadManager:
             filename = _url_basename(url) or f"download-{self._next_id}.bin"
 
         filename = _sanitize_filename(filename)
-        dest_path = downloads_dir / filename
+        dest_root = dest_dir or downloads_dir
+        dest_path = dest_root / filename
         temp_path = dest_path.with_suffix(dest_path.suffix + ".part")
 
         with self._lock:
@@ -176,6 +186,8 @@ class DownloadManager:
                 provider=provider,
                 dest_path=dest_path,
                 temp_path=temp_path,
+                target_root=target_root,
+                record_source=record_source,
                 api_key_override=api_key_override,
                 force_start=bool(start_now),
             )
@@ -240,6 +252,74 @@ class DownloadManager:
             return {"Authorization": f"Bearer {token}"}
         return {}
 
+    async def _record_source_url(self, job: DownloadJob) -> None:
+        if not job.record_source or not job.target_root or not job.dest_path:
+            return
+        try:
+            relpath = job.dest_path.relative_to(job.target_root)
+        except Exception:
+            return
+
+        relpath_text = relpath.as_posix()
+        source_mgr = get_source_manager()
+        source = ModelSource(
+            url=job.url,
+            added_at=datetime.now(timezone.utc).isoformat(),
+            filename_hint=job.filename,
+            relpath=relpath_text,
+        )
+        await source_mgr.set_source_by_relpath(relpath_text, source)
+
+        async with get_db() as db:
+            try:
+                stat = job.dest_path.stat()
+            except Exception:
+                stat = None
+
+            if stat is not None:
+                cursor = await db.execute(
+                    "SELECT hash FROM file_index WHERE side = 'local' AND relpath = ?",
+                    (relpath_text,),
+                )
+                row = await cursor.fetchone()
+                if not row:
+                    await db.execute(
+                        """
+                        INSERT INTO file_index (side, relpath, size, mtime_ns, hash, hash_computed_at, indexed_at)
+                        VALUES (?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            "local",
+                            relpath_text,
+                            stat.st_size,
+                            stat.st_mtime_ns,
+                            None,
+                            None,
+                            datetime.now(timezone.utc).isoformat(),
+                        ),
+                    )
+
+            cursor = await db.execute(
+                "SELECT id FROM queue WHERE task_type='hash_file' AND src_relpath=? AND status IN ('pending', 'running')",
+                (relpath_text,),
+            )
+            if not await cursor.fetchone():
+                await db.execute(
+                    """
+                    INSERT INTO queue (task_type, src_relpath, created_at, size_bytes)
+                    VALUES (?, ?, ?, 0)
+                    """,
+                    ("hash_file", relpath_text, datetime.now(timezone.utc).isoformat()),
+                )
+            await db.commit()
+
+    def _post_complete(self, job: DownloadJob) -> None:
+        if job.record_source and job.target_root:
+            try:
+                asyncio.run(self._record_source_url(job))
+            except Exception:
+                pass
+
     def _run_job(self, job_id: int) -> None:
         job = self.get_job(job_id)
         if not job:
@@ -258,6 +338,9 @@ class DownloadManager:
 
                 if not job.temp_path:
                     job.temp_path = job.dest_path.with_suffix(job.dest_path.suffix + ".part")
+
+                if job.dest_path:
+                    job.dest_path.parent.mkdir(parents=True, exist_ok=True)
 
                 existing_size = job.temp_path.stat().st_size if job.temp_path.exists() else 0
                 headers = {
@@ -324,6 +407,7 @@ class DownloadManager:
                             job.temp_path.replace(job.dest_path)
                             job.status = "completed"
                             job.updated_at = _now_iso()
+                            self._post_complete(job)
                             return
 
                         # If total is unknown, assume completion when server closes
@@ -331,6 +415,7 @@ class DownloadManager:
                             job.temp_path.replace(job.dest_path)
                             job.status = "completed"
                             job.updated_at = _now_iso()
+                            self._post_complete(job)
                             return
 
                 except requests.exceptions.ReadTimeout:

@@ -11,6 +11,7 @@ const Sync = {
     sourceUrls: new Map(),   // hash -> {url, added_at, notes}
     bundles: [],             // List of bundle names for quick add
     activeSourceContext: null,
+    activeFolderDownloadContext: null,
     confirmModal: null,
     confirmResolve: null,
     confirmElements: null,
@@ -89,6 +90,7 @@ const Sync = {
 
     bindEvents() {
         document.getElementById('refresh-btn')?.addEventListener('click', () => this.refresh());
+        document.getElementById('reclassify-btn')?.addEventListener('click', () => this.reclassifyAllSafetensors());
         document.getElementById('expand-all-btn')?.addEventListener('click', () => this.expandAll());
         document.getElementById('collapse-all-btn')?.addEventListener('click', () => this.collapseAll());
 
@@ -445,6 +447,7 @@ const Sync = {
                         ${metricsHtml}
                         <div class="path-actions">
                             ${hashFolderBtn}
+                            <button class="btn-folder-download" data-action="folder-download" data-folder="${folderPath}" title="Download into this folder">+</button>
                             <button class="btn-ai-lookup" data-action="ai-lookup-folder" data-folder="${folderPath}" title="AI lookup source URLs for this folder">✨</button>
                             <button class="btn-add-bundle" data-action="add-folder-to-bundle" data-folder="${folderPath}" title="Add all in folder to bundle">📦</button>
                         </div>
@@ -875,6 +878,13 @@ const Sync = {
         if (target.dataset.action === 'ai-lookup-folder') {
             const folderPath = target.dataset.folder || '';
             this.enqueueFolderAiLookup(folderPath);
+            return;
+        }
+
+        // Download to folder
+        if (target.dataset.action === 'folder-download') {
+            const folderPath = target.dataset.folder || '';
+            this.openFolderDownloadModal(folderPath);
             return;
         }
 
@@ -1744,6 +1754,168 @@ const Sync = {
             modal.classList.remove('visible');
         }
         this.activeSourceContext = null;
+    },
+
+    async reclassifyAllSafetensors() {
+        const confirmed = await this.confirmAction({
+            title: 'Recalculate Tags',
+            message: 'This will re-run safetensors classification for all indexed files. Continue?',
+            confirmText: 'Reclassify',
+            confirmClass: 'btn-primary',
+            rememberKey: 'reclassify_safetensors_ok',
+            rememberLabel: 'Skip this prompt next time',
+        });
+        if (!confirmed) return;
+
+        try {
+            const res = await App.api('POST', '/index/safetensors/reclassify');
+            this.safetensorsTags.clear();
+            this.safetensorsPending.clear();
+            this.render(document.getElementById('search-input')?.value || '');
+            if (res) {
+                alert(`Safetensors tags recalculated.\nUpdated ${res.updated || 0} of ${res.total || 0} files.`);
+            } else {
+                alert('Safetensors tags recalculated.');
+            }
+        } catch (err) {
+            console.error('Reclassification failed:', err);
+            alert('Failed to reclassify: ' + err.message);
+        }
+    },
+
+    // ==================== Folder Download Modal ====================
+
+    openFolderDownloadModal(folderPath) {
+        let modal = document.getElementById('folder-download-modal');
+        if (!modal) {
+            modal = document.createElement('div');
+            modal.id = 'folder-download-modal';
+            modal.className = 'modal-overlay';
+            modal.innerHTML = `
+                <div class="modal-content">
+                    <div class="modal-header">
+                        <h3>⬇️ Download Into Folder</h3>
+                        <button class="modal-close" onclick="Sync.closeFolderDownloadModal()">×</button>
+                    </div>
+                    <div class="modal-body">
+                        <p class="modal-folder-path" style="font-weight: 500; margin-bottom: 12px; font-family: var(--font-mono); font-size: 13px;"></p>
+                        <label for="folder-download-url">Download URL:</label>
+                        <input type="url" id="folder-download-url" class="modal-input" placeholder="https://civitai.com/api/download/models/..." />
+                        <div id="folder-download-test-result" style="margin-top: -8px; margin-bottom: 12px; font-size: 12px; display: none;"></div>
+                        <p class="modal-hint">This will download into the selected folder and auto-link the source URL after completion.</p>
+                    </div>
+                    <div class="modal-footer">
+                        <button class="btn" id="folder-download-test">🔍 Test Link</button>
+                        <button class="btn" onclick="Sync.closeFolderDownloadModal()">Cancel</button>
+                        <button class="btn btn-primary" id="folder-download-start">Download</button>
+                    </div>
+                </div>
+            `;
+            document.body.appendChild(modal);
+
+            modal.addEventListener('click', (e) => {
+                if (e.target === modal) this.closeFolderDownloadModal();
+            });
+        }
+
+        this.activeFolderDownloadContext = { folderPath };
+        modal.querySelector('.modal-folder-path').textContent = folderPath || '(root)';
+        modal.querySelector('#folder-download-url').value = '';
+
+        const testBtn = modal.querySelector('#folder-download-test');
+        const testResult = modal.querySelector('#folder-download-test-result');
+        testResult.style.display = 'none';
+        testBtn.onclick = () => this.testFolderDownloadUrl();
+
+        const startBtn = modal.querySelector('#folder-download-start');
+        startBtn.onclick = () => this.startFolderDownload();
+
+        modal.classList.add('visible');
+        modal.querySelector('#folder-download-url').focus();
+    },
+
+    closeFolderDownloadModal() {
+        const modal = document.getElementById('folder-download-modal');
+        if (modal) {
+            modal.classList.remove('visible');
+        }
+        this.activeFolderDownloadContext = null;
+    },
+
+    async testFolderDownloadUrl() {
+        const input = document.getElementById('folder-download-url');
+        const url = input.value.trim();
+        const resultDiv = document.getElementById('folder-download-test-result');
+        const testBtn = document.getElementById('folder-download-test');
+
+        if (!url) return null;
+
+        testBtn.disabled = true;
+        testBtn.textContent = '⏱ Testing...';
+        resultDiv.style.display = 'block';
+        resultDiv.style.color = 'var(--text-muted)';
+        resultDiv.textContent = 'Checking URL connectivity...';
+
+        try {
+            const res = await App.api('GET', `/index/check-url?url=${encodeURIComponent(url)}`);
+            if (res.ok) {
+                resultDiv.style.color = 'var(--success)';
+                const sizeStr = res.size ? ` (${(res.size / (1024 * 1024)).toFixed(1)} MB)` : '';
+                resultDiv.innerHTML = `✅ Link OK! HTTP ${res.status}${sizeStr}`;
+                return res;
+            } else {
+                resultDiv.style.color = 'var(--danger)';
+                if (res.is_webpage) {
+                    resultDiv.textContent = `❌ Error: URL is a webpage, not a file download (HTTP ${res.status})`;
+                } else {
+                    resultDiv.textContent = `❌ Failed: ${res.error || 'Status ' + res.status}`;
+                }
+                return res;
+            }
+        } catch (err) {
+            resultDiv.style.color = 'var(--danger)';
+            resultDiv.textContent = `❌ Error: ${err.message}`;
+            return { ok: false, error: err.message };
+        } finally {
+            testBtn.disabled = false;
+            testBtn.textContent = '🔍 Test Link';
+        }
+    },
+
+    async startFolderDownload() {
+        const input = document.getElementById('folder-download-url');
+        const url = input.value.trim();
+        if (!url) {
+            alert('Please enter a URL');
+            return;
+        }
+
+        const testResult = await this.testFolderDownloadUrl();
+        if (testResult && !testResult.ok) {
+            const msg = testResult.is_webpage
+                ? "This URL looks like a webpage, not a direct file download.\n\nAre you sure you want to start it anyway?"
+                : "The link validation failed.\n\nAre you sure you want to start it anyway?";
+
+            const confirmed = await this.confirmAction({
+                title: 'Start Download',
+                message: msg,
+                confirmText: 'Start',
+                confirmClass: 'btn-primary',
+            });
+            if (!confirmed) return;
+        }
+
+        const folderPath = this.activeFolderDownloadContext?.folderPath || '';
+        try {
+            await App.api('POST', '/downloader/jobs/to-folder', {
+                url,
+                folder_relpath: folderPath,
+                start_now: false,
+            });
+            this.closeFolderDownloadModal();
+        } catch (err) {
+            alert('Failed to start download: ' + err.message);
+        }
     },
 
     async saveSourceUrl(hash, relpath, filename) {
