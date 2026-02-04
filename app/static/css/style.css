@@ -484,6 +484,10 @@ a:hover {
     background: var(--success);
 }
 
+.presence-bar.mixed {
+    background: linear-gradient(to bottom, var(--success) 60%, var(--border) 60%);
+}
+
 .presence-bar.absent {
     background: var(--border);
 }

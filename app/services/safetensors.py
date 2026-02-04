@@ -88,15 +88,21 @@ def classify_safetensors_header(header: dict, relpath: str | None = None) -> dic
     has_input_hint = any(k.startswith("input_hint_block.") for k in keys)
     has_zero_convs = any(k.startswith("zero_convs.") for k in keys)
     has_controlnet_prefix = any(k.startswith("controlnet.") for k in keys)
+    has_controlnet_blocks = any(k.startswith("controlnet_blocks.") for k in keys)
+    has_controlnet_single_blocks = any(k.startswith("controlnet_single_blocks.") for k in keys)
+    has_controlnet_mode_embedder = any(k.startswith("controlnet_mode_embedder.") for k in keys)
+    has_context_embedder = any(k.startswith("context_embedder.") for k in keys)
     has_add_embedding = any(k.startswith("add_embedding.") for k in keys)
     has_controlnet_cond_embedding = any(k.startswith("controlnet_cond_embedding.") for k in keys)
     has_lora_controlnet = "lora_controlnet" in header
+    has_lllite_prefix = any(k.startswith("lllite_") for k in keys)
     has_t2i_adapter_prefix = any(k.startswith("adapter.body.") for k in keys)
     has_t2i_body_prefix = any(k.startswith("body.") for k in keys)
     has_t2i_blocks = any(".block1." in k or ".block2." in k for k in keys)
     has_t2i_resnets = any(".resnets." in k for k in keys)
     has_t2i_in_conv = any(".in_conv." in k for k in keys)
     controlnet_base_dim = None
+    controlnet_sdxl_hint = False
     for k in keys:
         if ".attn2.to_k.weight" in k:
             tensor = header.get(k)
@@ -112,6 +118,9 @@ def classify_safetensors_header(header: dict, relpath: str | None = None) -> dic
             shape = tensor.get("shape")
             if isinstance(shape, list) and len(shape) == 2:
                 controlnet_base_dim = shape[1]
+
+    if controlnet_base_dim and controlnet_base_dim >= 1280:
+        controlnet_sdxl_hint = True
 
     signals = []
     if has_unet:
@@ -217,12 +226,30 @@ def classify_safetensors_header(header: dict, relpath: str | None = None) -> dic
             zit_score = min(0.92, zit_score + 0.04)
             zit_signals.append("zit:x_embedder")
 
+    # Flux ControlNet detection
+    controlnet_flux_score = 0.0
+    controlnet_flux_signals = []
+    if has_controlnet_blocks and has_controlnet_single_blocks and has_context_embedder:
+        controlnet_flux_score = 0.9
+        controlnet_flux_signals.append("controlnet-flux:blocks+context")
+        if has_controlnet_mode_embedder:
+            controlnet_flux_score = min(0.94, controlnet_flux_score + 0.04)
+            controlnet_flux_signals.append("controlnet-flux:mode_embedder")
+
     # ControlNet detection
     controlnet_score = 0.0
     controlnet_signals = []
     controlnet_base_score = 0.0
     controlnet_base_signals = []
-    if has_input_hint or has_zero_convs or has_controlnet_prefix or has_controlnet_cond_embedding or has_add_embedding:
+    if (
+        has_input_hint
+        or has_zero_convs
+        or has_controlnet_prefix
+        or has_controlnet_cond_embedding
+        or has_add_embedding
+        or has_lllite_prefix
+        or controlnet_flux_score > 0
+    ):
         controlnet_score = 0.88
         controlnet_signals.append("controlnet:input_hint/zero_convs")
         if has_controlnet_prefix:
@@ -231,6 +258,12 @@ def classify_safetensors_header(header: dict, relpath: str | None = None) -> dic
         if has_controlnet_cond_embedding or has_add_embedding:
             controlnet_score = min(0.95, controlnet_score + 0.04)
             controlnet_signals.append("controlnet:cond_embedding")
+        if has_lllite_prefix:
+            controlnet_score = min(0.95, controlnet_score + 0.04)
+            controlnet_signals.append("controlnet:lllite")
+        if controlnet_flux_score > 0:
+            controlnet_score = min(0.95, controlnet_score + 0.04)
+            controlnet_signals.append("controlnet:flux_blocks")
         if controlnet_base_dim:
             if controlnet_base_dim == 768:
                 controlnet_base_score = 0.9
@@ -338,6 +371,9 @@ def classify_safetensors_header(header: dict, relpath: str | None = None) -> dic
         if "controlnet" in relpath_text:
             controlnet_score = max(controlnet_score, 0.9)
             controlnet_signals.append("path:controlnet")
+        if "lllite" in relpath_text or "controllllite" in relpath_text or "controllite" in relpath_text:
+            controlnet_score = max(controlnet_score, 0.9)
+            controlnet_signals.append("path:lllite")
         if "t2i" in relpath_text or "t2i-adapter" in relpath_text or "t2i_adapter" in relpath_text:
             t2i_score = max(t2i_score, 0.85)
             t2i_signals.append("path:t2i")
@@ -350,6 +386,7 @@ def classify_safetensors_header(header: dict, relpath: str | None = None) -> dic
         if "xl" in relpath_text and controlnet_score > 0:
             controlnet_base_score = max(controlnet_base_score, 0.82)
             controlnet_base_signals.append("path:xl")
+            controlnet_sdxl_hint = True
 
     # Apply WAN base if version is known or leave generic
     if wan_base_score > 0:
@@ -369,7 +406,8 @@ def classify_safetensors_header(header: dict, relpath: str | None = None) -> dic
     add_tag("controlnet-lora", 0.85 if has_lora_controlnet else 0.0, ["controlnet:lora"])
     add_tag("controlnet-sd1", controlnet_base_score if controlnet_base_dim == 768 else 0.0, controlnet_base_signals)
     add_tag("controlnet-sd2", controlnet_base_score if controlnet_base_dim == 1024 else 0.0, controlnet_base_signals)
-    add_tag("controlnet-sdxl", controlnet_base_score if controlnet_base_dim and controlnet_base_dim >= 1280 else 0.0, controlnet_base_signals)
+    add_tag("controlnet-sdxl", controlnet_base_score if controlnet_sdxl_hint else 0.0, controlnet_base_signals)
+    add_tag("controlnet-flux", controlnet_flux_score, controlnet_flux_signals)
     add_tag("t2i-adapter", t2i_score, t2i_signals)
     add_tag("wan2.2", wan22_score, wan22_signals)
     add_tag("wan2.1", wan21_score, wan21_signals)

@@ -397,11 +397,11 @@ const Sync = {
             html += `
                 <div class="diff-row diff-row-folder" data-path="${folderPath}" data-depth="${depth}">
                     <div class="diff-col diff-col-local">
-                        ${this.config.local_allow_delete && folderStatus.local === 'has-files' ? `<button class="btn-icon btn-delete" data-action="delete-folder" data-side="local" data-folder="${folderPath}" title="Delete all in folder from Local">🗑️</button>` : ''}
+                        ${this.config.local_allow_delete && folderStatus.local !== 'absent' ? `<button class="btn-icon btn-delete" data-action="delete-folder" data-side="local" data-folder="${folderPath}" title="Delete all in folder from Local">🗑️</button>` : ''}
                         <span class="btn-slot">
                             ${showSyncToLake ? `<button class="btn-icon btn-copy" data-action="sync-folder-to-lake" data-folder="${folderPath}" title="Copy ${folderStatus.onlyLocalCount || ''} to Lake →">→</button>` : ''}
                         </span>
-                        <span class="presence-bar ${folderStatus.local === 'has-files' ? 'present' : 'absent'}"></span>
+                        <span class="presence-bar ${folderStatus.local}"></span>
                     </div>
                     <div class="diff-col diff-col-path">
                         <span class="tree-indent" style="width: ${depth * 20}px"></span>
@@ -419,11 +419,11 @@ const Sync = {
                         </div>
                     </div>
                     <div class="diff-col diff-col-lake">
-                        <span class="presence-bar ${folderStatus.lake === 'has-files' ? 'present' : 'absent'}"></span>
+                        <span class="presence-bar ${folderStatus.lake}"></span>
                         <span class="btn-slot">
                             ${showSyncToLocal ? `<button class="btn-icon btn-copy" data-action="sync-folder-to-local" data-folder="${folderPath}" title="← Copy ${folderStatus.onlyLakeCount || ''} to Local">←</button>` : ''}
                         </span>
-                        ${this.config.lake_allow_delete && folderStatus.lake === 'has-files' ? `<button class="btn-icon btn-delete" data-action="delete-folder" data-side="lake" data-folder="${folderPath}" title="Delete all in folder from Lake">🗑️</button>` : ''}
+                        ${this.config.lake_allow_delete && folderStatus.lake !== 'absent' ? `<button class="btn-icon btn-delete" data-action="delete-folder" data-side="lake" data-folder="${folderPath}" title="Delete all in folder from Lake">🗑️</button>` : ''}
                     </div>
                 </div>
             `;
@@ -657,12 +657,18 @@ const Sync = {
     },
 
     getFolderStatus(node) {
-        let hasLocal = false, hasLake = false, hasOnlyLocal = false, hasOnlyLake = false, hasProbableSame = false;
+        let hasLocal = false, missingLocal = false;
+        let hasLake = false, missingLake = false;
+        let hasOnlyLocal = false, hasOnlyLake = false, hasProbableSame = false;
 
         const checkNode = (n) => {
             for (const file of n.files) {
                 if (file.local_size !== null) hasLocal = true;
+                else missingLocal = true;
+
                 if (file.lake_size !== null) hasLake = true;
+                else missingLake = true;
+
                 if (file.status === 'only_local') hasOnlyLocal = true;
                 if (file.status === 'only_lake') hasOnlyLake = true;
                 if (file.status === 'probable_same') hasProbableSame = true;
@@ -673,9 +679,15 @@ const Sync = {
         };
         checkNode(node);
 
+        const getStatus = (has, missing) => {
+            if (!has) return 'absent';
+            if (missing) return 'mixed';
+            return 'present';
+        };
+
         return {
-            local: hasLocal ? 'has-files' : 'no-files',
-            lake: hasLake ? 'has-files' : 'no-files',
+            local: getStatus(hasLocal, missingLocal),
+            lake: getStatus(hasLake, missingLake),
             localIcon: hasLocal ? '●' : '○',
             lakeIcon: hasLake ? '●' : '○',
             hasOnlyLocal,
