@@ -33,7 +33,7 @@ class Settings(BaseSettings):
     
     # Remote Session (Phase 2)
     remote_base_url: str = "https://your.domain.example"
-    remote_session_ttl_minutes: int = 60
+    remote_session_ttl_minutes: int = 240
 
     # xAI (Grok) - AI URL discovery
     xai_api_key: str | None = None

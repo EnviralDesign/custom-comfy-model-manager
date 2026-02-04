@@ -80,8 +80,18 @@ def url_basename(url: str) -> str:
 def filename_matches_url(filename: str, url: str, response_filename: str | None = None) -> bool:
     if not filename or not url:
         return False
-    if url_basename(url) == filename:
+    url_name = url_basename(url)
+    if url_name == filename:
         return True
     if response_filename and response_filename == filename:
+        return True
+
+    def _normalize(name: str) -> str:
+        return name.strip().lstrip("_")
+
+    normalized_expected = _normalize(filename)
+    if url_name and _normalize(url_name) == normalized_expected:
+        return True
+    if response_filename and _normalize(response_filename) == normalized_expected:
         return True
     return False

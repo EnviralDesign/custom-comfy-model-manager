@@ -21,7 +21,6 @@ const toolCivitaiPage = document.getElementById("tool-civitai-page");
 const toolCivitaiCursor = document.getElementById("tool-civitai-cursor");
 const toolCivitaiType = document.getElementById("tool-civitai-type");
 const toolCivitaiSupports = document.getElementById("tool-civitai-supports");
-const toolCivitaiNsfw = document.getElementById("tool-civitai-nsfw");
 const toolCivitaiSearchBtn = document.getElementById("tool-civitai-search-btn");
 const toolCivitaiSearchResult = document.getElementById("tool-civitai-search-result");
 const toolCivitaiVersion = document.getElementById("tool-civitai-version");
@@ -345,10 +344,6 @@ if (toolCivitaiSearchBtn) {
                     toolCivitaiSupports.value === ""
                         ? null
                         : toolCivitaiSupports.value === "true",
-                nsfw:
-                    toolCivitaiNsfw.value === ""
-                        ? null
-                        : toolCivitaiNsfw.value === "true",
             });
             renderJson(toolCivitaiSearchResult, data);
         } catch (err) {
