@@ -8,11 +8,8 @@ from typing import Optional, Any
 from app.config import get_settings
 from app.services.source_manager import get_source_manager, ModelSource
 from app.database import get_db
-from app.services.ai_lookup_service import (
-    check_url_sync,
-    filename_matches_url,
-    call_xai_lookup,
-)
+from app.services.ai_lookup_service import call_ai_lookup
+from app.services.url_utils import check_url_sync, filename_matches_url
 
 from starlette.concurrency import run_in_threadpool
 
@@ -65,9 +62,7 @@ async def ai_lookup_source_url(request: AiSourceLookupRequest):
     Use xAI Grok (with web search) to find a direct download URL for an exact filename.
     """
     settings = get_settings()
-    api_key = settings.xai_api_key
-    if not api_key:
-        raise HTTPException(status_code=400, detail="XAI_API_KEY is not configured")
+    api_key = settings.xai_api_key or ""
 
     filename = request.filename.strip()
     if not filename:
@@ -78,12 +73,18 @@ async def ai_lookup_source_url(request: AiSourceLookupRequest):
         base_url = settings.xai_api_base_url.rstrip("/")
 
         try:
-            result = call_xai_lookup(
+            result = call_ai_lookup(
                 base_url=base_url,
                 api_key=api_key,
                 model=model,
                 filename=filename,
                 relpath=request.relpath,
+                file_hash=None,
+                civitai_base_url=settings.civitai_api_base_url,
+                civitai_api_key=settings.civitai_api_key,
+                huggingface_api_key=settings.huggingface_api_key,
+                lookup_mode=settings.ai_lookup_mode,
+                tool_max_steps=settings.ai_tool_max_steps,
             )
         except Exception as exc:
             return AiSourceLookupResponse(
@@ -118,16 +119,6 @@ async def ai_lookup_source_url(request: AiSourceLookupRequest):
                 model=model,
             )
 
-        if not filename_matches_url(filename, candidate_url):
-            return AiSourceLookupResponse(
-                found=False,
-                accepted=False,
-                url=None,
-                filename=filename,
-                reason="Candidate URL filename does not match exactly",
-                model=model,
-            )
-
         validation = check_url_sync(candidate_url)
         if not validation.get("ok"):
             return AiSourceLookupResponse(
@@ -136,6 +127,17 @@ async def ai_lookup_source_url(request: AiSourceLookupRequest):
                 url=None,
                 filename=filename,
                 reason="Candidate URL failed validation",
+                validation=validation,
+                model=model,
+            )
+
+        if not filename_matches_url(filename, candidate_url, validation.get("filename")):
+            return AiSourceLookupResponse(
+                found=False,
+                accepted=False,
+                url=None,
+                filename=filename,
+                reason="Candidate URL filename does not match exactly",
                 validation=validation,
                 model=model,
             )

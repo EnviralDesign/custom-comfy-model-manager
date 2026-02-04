@@ -40,6 +40,15 @@ class Settings(BaseSettings):
     xai_api_base_url: str = "https://api.x.ai"
     xai_model: str = "grok-4-1-fast-reasoning"
     xai_lookup_concurrency: int = 1
+    ai_lookup_mode: str = "tool_agent"
+    ai_tool_max_steps: int = 20
+
+    # Civitai API
+    civitai_api_key: str | None = None
+    civitai_api_base_url: str = "https://civitai.com"
+
+    # Hugging Face API
+    huggingface_api_key: str | None = None
     
     # App data directory
     app_data_dir: Path | None = None
@@ -47,6 +56,13 @@ class Settings(BaseSettings):
     # Server
     host: str = "127.0.0.1"
     port: int = 8420
+
+    # Downloader service
+    downloader_host: str = "127.0.0.1"
+    downloader_port: int = 8421
+    downloader_stall_timeout_seconds: int = 2
+    downloader_connect_timeout_seconds: int = 10
+    downloader_max_concurrent: int = 1
     
     def get_app_data_dir(self) -> Path:
         """Get the app data directory, creating it if needed."""
@@ -67,6 +83,12 @@ class Settings(BaseSettings):
     def get_db_path(self) -> Path:
         """Get the SQLite database path."""
         return self.get_app_data_dir() / "app.db"
+
+    def get_downloads_dir(self) -> Path:
+        """Get the default Downloads directory, creating it if needed."""
+        path = Path.home() / "Downloads"
+        path.mkdir(parents=True, exist_ok=True)
+        return path
 
 
 @lru_cache

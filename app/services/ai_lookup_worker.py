@@ -10,11 +10,8 @@ from typing import Any
 from app.config import get_settings
 from app.database import get_db
 from app.websocket import broadcast
-from app.services.ai_lookup_service import (
-    call_xai_lookup,
-    check_url_sync,
-    filename_matches_url,
-)
+from app.services.ai_lookup_service import call_ai_lookup
+from app.services.url_utils import check_url_sync, filename_matches_url
 
 
 class AiLookupWorker:
@@ -104,19 +101,21 @@ class AiLookupWorker:
             if not job:
                 return
 
-            if not self.settings.xai_api_key:
-                await self._fail_job(job_id, "XAI_API_KEY is not configured.")
-                return
-
-            await self._append_step(job_id, "Calling Grok with web search...", source="system")
+            await self._append_step(job_id, "Running lookup (Civitai API + Grok fallback)...", source="system")
 
             result = await asyncio.to_thread(
-                call_xai_lookup,
+                call_ai_lookup,
                 base_url=self.settings.xai_api_base_url,
                 api_key=self.settings.xai_api_key or "",
                 model=self.settings.xai_model,
                 filename=job["filename"],
                 relpath=job.get("relpath"),
+                file_hash=job.get("file_hash"),
+                civitai_base_url=self.settings.civitai_api_base_url,
+                civitai_api_key=self.settings.civitai_api_key,
+                huggingface_api_key=self.settings.huggingface_api_key,
+                lookup_mode=self.settings.ai_lookup_mode,
+                tool_max_steps=self.settings.ai_tool_max_steps,
             )
 
             if await self._is_cancelled(job_id):
@@ -144,15 +143,6 @@ class AiLookupWorker:
                 )
                 return
 
-            if not filename_matches_url(job["filename"], candidate_url):
-                await self._complete_job(
-                    job_id,
-                    found=0,
-                    accepted=0,
-                    notes="Candidate URL filename does not match exactly.",
-                )
-                return
-
             await self._append_step(job_id, "Validating candidate URL...", source="system")
             validation = await asyncio.to_thread(check_url_sync, candidate_url)
 
@@ -166,6 +156,19 @@ class AiLookupWorker:
                     candidate_notes=result.get("notes") or "",
                     validation=validation,
                     notes="Candidate URL failed validation.",
+                )
+                return
+
+            if not filename_matches_url(job["filename"], candidate_url, validation.get("filename")):
+                await self._complete_job(
+                    job_id,
+                    found=0,
+                    accepted=0,
+                    candidate_url=candidate_url,
+                    candidate_source=result.get("source") or "",
+                    candidate_notes=result.get("notes") or "",
+                    validation=validation,
+                    notes="Candidate URL filename does not match exactly.",
                 )
                 return
 

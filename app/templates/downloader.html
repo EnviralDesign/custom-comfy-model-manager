@@ -1,0 +1,169 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Downloader - ComfyUI Model Manager</title>
+    <link rel="stylesheet" href="/static/css/style.css">
+</head>
+
+<body>
+    <nav class="top-bar">
+        <div class="logo">
+            <span class="logo-icon">⬇️</span>
+            <span class="logo-text">Comfy Downloader</span>
+        </div>
+        <div class="nav-actions">
+            <button class="btn btn-secondary" id="download-cancel-all">Cancel All</button>
+            <span class="text-secondary text-sm">Downloads: {{ downloads_dir }}</span>
+        </div>
+    </nav>
+
+    <main class="dedupe-layout">
+        <div class="dedupe-container">
+            <div class="dedupe-step">
+                <div class="wizard-header">
+                    <h2>Resumable Downloads</h2>
+                    <span class="wizard-progress">Aggressive resume enabled (stall timeout: 2s)</span>
+                </div>
+
+                <div style="margin-top: 16px; background: var(--bg-secondary); border: 1px solid var(--border); border-radius: var(--radius-md); padding: 14px;">
+                    <div style="display: flex; gap: 12px; flex-wrap: wrap;">
+                        <input id="download-url" class="search-input" style="flex: 1 1 420px;" placeholder="Paste Civitai or Hugging Face download URL" />
+                        <input id="download-filename" class="search-input" style="flex: 1 1 220px;" placeholder="Optional filename override" />
+                        <input id="download-api-key" class="search-input" style="flex: 1 1 220px;" placeholder="Optional API key override" />
+                        <select id="download-provider" class="search-input" style="flex: 0 0 180px;">
+                            <option value="auto">Auto-detect</option>
+                            <option value="civitai">Civitai</option>
+                            <option value="huggingface">Hugging Face</option>
+                            <option value="generic">Generic</option>
+                        </select>
+                        <button class="btn btn-primary" id="download-start-btn">Queue</button>
+                        <button class="btn btn-secondary" id="download-start-now-btn">Start Now</button>
+                    </div>
+                </div>
+
+                <div id="download-jobs" style="margin-top: 18px;">
+                    <div class="text-secondary text-sm">No downloads yet.</div>
+                </div>
+            </div>
+
+            <div class="dedupe-step" style="margin-top: 26px;">
+                <div class="wizard-header">
+                    <h2>AI Agent Trace</h2>
+                    <span class="wizard-progress">Tool-calling trace for Civitai + Hugging Face discovery</span>
+                </div>
+
+                <div style="margin-top: 16px; background: var(--bg-secondary); border: 1px solid var(--border); border-radius: var(--radius-md); padding: 14px;">
+                    <div style="display: flex; gap: 12px; flex-wrap: wrap;">
+                        <input id="agent-query" class="search-input" style="flex: 1 1 420px;" placeholder="Model name or exact filename" />
+                        <input id="agent-hash" class="search-input" style="flex: 1 1 220px;" placeholder="Optional file hash" />
+                        <label style="display: inline-flex; align-items: center; gap: 8px; color: var(--text-secondary);">
+                            <input type="checkbox" id="agent-exact" checked />
+                            Exact filename
+                        </label>
+                        <button class="btn btn-primary" id="agent-start-btn">Run Trace</button>
+                        <button class="btn btn-secondary" id="agent-cancel-btn">Cancel</button>
+                    </div>
+                </div>
+
+                <div id="agent-trace" style="margin-top: 18px;">
+                    <div class="text-secondary text-sm">No trace yet.</div>
+                </div>
+            </div>
+
+            <div class="dedupe-step" style="margin-top: 26px;">
+                <div class="wizard-header">
+                    <h2>Tool Playground</h2>
+                    <span class="wizard-progress">Manual tool calls for Civitai, Hugging Face, and URL validation</span>
+                </div>
+
+                <div style="margin-top: 16px; display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 12px;">
+                    <div style="background: var(--bg-secondary); border: 1px solid var(--border); border-radius: var(--radius-md); padding: 12px;">
+                        <div style="font-weight: 600; margin-bottom: 8px;">Civitai Search</div>
+                        <input id="tool-civitai-query" class="search-input" style="width: 100%; margin-bottom: 8px;" placeholder="Query" />
+                        <div style="display: flex; gap: 8px; flex-wrap: wrap;">
+                            <input id="tool-civitai-limit" class="search-input" style="flex: 1;" placeholder="Limit" value="20" />
+                            <input id="tool-civitai-page" class="search-input" style="flex: 1;" placeholder="Page" value="1" />
+                            <input id="tool-civitai-cursor" class="search-input" style="flex: 1;" placeholder="Cursor (optional)" />
+                            <select id="tool-civitai-type" class="search-input" style="flex: 1;">
+                                <option value="">All Types</option>
+                                <option value="Checkpoint">Checkpoint</option>
+                                <option value="LORA">LORA</option>
+                                <option value="TextualInversion">TextualInversion</option>
+                                <option value="Controlnet">Controlnet</option>
+                                <option value="Hypernetwork">Hypernetwork</option>
+                                <option value="Poses">Poses</option>
+                                <option value="AestheticGradient">AestheticGradient</option>
+                            </select>
+                            <select id="tool-civitai-supports" class="search-input" style="flex: 1;">
+                                <option value="">supportsGeneration (any)</option>
+                                <option value="true">supportsGeneration=true</option>
+                                <option value="false">supportsGeneration=false</option>
+                            </select>
+                            <select id="tool-civitai-nsfw" class="search-input" style="flex: 1;">
+                                <option value="">nsfw (any)</option>
+                                <option value="true">nsfw=true</option>
+                                <option value="false">nsfw=false</option>
+                            </select>
+                            <button class="btn btn-small btn-primary" id="tool-civitai-search-btn">Run</button>
+                        </div>
+                        <pre id="tool-civitai-search-result" class="text-secondary text-sm" style="margin-top: 8px; white-space: pre-wrap;"></pre>
+                    </div>
+
+                    <div style="background: var(--bg-secondary); border: 1px solid var(--border); border-radius: var(--radius-md); padding: 12px;">
+                        <div style="font-weight: 600; margin-bottom: 8px;">Civitai Model Version</div>
+                        <input id="tool-civitai-version" class="search-input" style="width: 100%; margin-bottom: 8px;" placeholder="Model version ID" />
+                        <button class="btn btn-small btn-primary" id="tool-civitai-version-btn">Run</button>
+                        <pre id="tool-civitai-version-result" class="text-secondary text-sm" style="margin-top: 8px; white-space: pre-wrap;"></pre>
+                    </div>
+
+                    <div style="background: var(--bg-secondary); border: 1px solid var(--border); border-radius: var(--radius-md); padding: 12px;">
+                        <div style="font-weight: 600; margin-bottom: 8px;">Civitai By Hash</div>
+                        <input id="tool-civitai-hash" class="search-input" style="width: 100%; margin-bottom: 8px;" placeholder="BLAKE3 hash" />
+                        <button class="btn btn-small btn-primary" id="tool-civitai-hash-btn">Run</button>
+                        <pre id="tool-civitai-hash-result" class="text-secondary text-sm" style="margin-top: 8px; white-space: pre-wrap;"></pre>
+                    </div>
+
+                    <div style="background: var(--bg-secondary); border: 1px solid var(--border); border-radius: var(--radius-md); padding: 12px;">
+                        <div style="font-weight: 600; margin-bottom: 8px;">HF Search</div>
+                        <input id="tool-hf-query" class="search-input" style="width: 100%; margin-bottom: 8px;" placeholder="Query" />
+                        <div style="display: flex; gap: 8px;">
+                            <input id="tool-hf-limit" class="search-input" style="flex: 1;" placeholder="Limit" value="20" />
+                            <button class="btn btn-small btn-primary" id="tool-hf-search-btn">Run</button>
+                        </div>
+                        <pre id="tool-hf-search-result" class="text-secondary text-sm" style="margin-top: 8px; white-space: pre-wrap;"></pre>
+                    </div>
+
+                    <div style="background: var(--bg-secondary); border: 1px solid var(--border); border-radius: var(--radius-md); padding: 12px;">
+                        <div style="font-weight: 600; margin-bottom: 8px;">HF Model Info</div>
+                        <input id="tool-hf-repo" class="search-input" style="width: 100%; margin-bottom: 8px;" placeholder="org/repo" />
+                        <button class="btn btn-small btn-primary" id="tool-hf-info-btn">Run</button>
+                        <pre id="tool-hf-info-result" class="text-secondary text-sm" style="margin-top: 8px; white-space: pre-wrap;"></pre>
+                    </div>
+
+                    <div style="background: var(--bg-secondary); border: 1px solid var(--border); border-radius: var(--radius-md); padding: 12px;">
+                        <div style="font-weight: 600; margin-bottom: 8px;">HF Resolve</div>
+                        <input id="tool-hf-resolve-repo" class="search-input" style="width: 100%; margin-bottom: 8px;" placeholder="org/repo" />
+                        <input id="tool-hf-resolve-file" class="search-input" style="width: 100%; margin-bottom: 8px;" placeholder="file path" />
+                        <input id="tool-hf-resolve-rev" class="search-input" style="width: 100%; margin-bottom: 8px;" placeholder="revision (default main)" />
+                        <button class="btn btn-small btn-primary" id="tool-hf-resolve-btn">Run</button>
+                        <pre id="tool-hf-resolve-result" class="text-secondary text-sm" style="margin-top: 8px; white-space: pre-wrap;"></pre>
+                    </div>
+
+                    <div style="background: var(--bg-secondary); border: 1px solid var(--border); border-radius: var(--radius-md); padding: 12px;">
+                        <div style="font-weight: 600; margin-bottom: 8px;">URL Validate</div>
+                        <input id="tool-url" class="search-input" style="width: 100%; margin-bottom: 8px;" placeholder="URL" />
+                        <button class="btn btn-small btn-primary" id="tool-url-btn">Run</button>
+                        <pre id="tool-url-result" class="text-secondary text-sm" style="margin-top: 8px; white-space: pre-wrap;"></pre>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </main>
+
+    <script src="/static/js/downloader.js"></script>
+</body>
+
+</html>

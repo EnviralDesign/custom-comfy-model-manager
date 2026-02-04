@@ -4,38 +4,10 @@ from __future__ import annotations
 
 import json
 from typing import Any, Optional
-from urllib.parse import unquote, urlparse
 
 import requests
 
-
-def check_url_sync(url: str) -> dict:
-    try:
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
-        }
-        response = requests.head(url, allow_redirects=True, timeout=10, headers=headers)
-
-        # If 404 or other error, or if Content-Length is missing (some sites block HEAD), try GET
-        if response.status_code != 200 or not response.headers.get("Content-Length"):
-            response = requests.get(url, stream=True, timeout=10, headers=headers)
-
-        size = response.headers.get("Content-Length")
-        content_type = response.headers.get("Content-Type", "").lower()
-
-        # Heuristic: if it's text/html, it's likely a landing page, not a direct download
-        is_webpage = "text/html" in content_type
-
-        return {
-            "ok": response.status_code == 200 and not is_webpage,
-            "status": response.status_code,
-            "size": int(size) if size else None,
-            "type": content_type,
-            "url": response.url,
-            "is_webpage": is_webpage,
-        }
-    except Exception as e:
-        return {"ok": False, "error": str(e)}
+from app.services.civitai_api import find_civitai_download
 
 
 def extract_response_text(payload: dict) -> str:
@@ -87,20 +59,6 @@ def extract_json_object(text: str) -> Optional[dict]:
     return None
 
 
-def url_basename(url: str) -> str:
-    try:
-        path = urlparse(url).path
-        return unquote(path.rsplit("/", 1)[-1])
-    except Exception:
-        return ""
-
-
-def filename_matches_url(filename: str, url: str) -> bool:
-    if not filename or not url:
-        return False
-    return url_basename(url) == filename
-
-
 def normalize_steps(raw_steps: Any) -> list[str]:
     if not raw_steps:
         return []
@@ -130,8 +88,10 @@ def call_xai_lookup(
     system_prompt = (
         "You are a web research assistant. Your task is to find a public direct download URL "
         "for the exact file name provided. Start with Hugging Face and Civitai, but if no exact "
-        "match is found you may search elsewhere. Only return a URL if the filename matches "
-        "exactly (case-sensitive) and points to a direct file download (not a landing page). "
+        "match is found you may search elsewhere. Try filename permutations (swap underscores/dashes "
+        "for spaces, drop fp16/fp8/pruned/full suffixes, trim trailing version tags like v1.2). "
+        "Only return a URL if the filename matches exactly (case-sensitive) and points to a direct "
+        "file download (not a landing page). "
         "If you cannot find an exact match, return found=false and url=null. "
         "Return ONLY a JSON object with keys: found (boolean), url (string|null), source (string|null), "
         "notes (string|null), steps (array of short strings)."
@@ -176,3 +136,93 @@ def call_xai_lookup(
         "steps": normalize_steps(result.get("steps")),
         "raw_text": text,
     }
+
+
+def call_ai_lookup(
+    *,
+    base_url: str,
+    api_key: str,
+    model: str,
+    filename: str,
+    relpath: str | None,
+    file_hash: str | None,
+    civitai_base_url: str,
+    civitai_api_key: str | None,
+    huggingface_api_key: str | None,
+    lookup_mode: str = "tool_agent",
+    tool_max_steps: int = 12,
+) -> dict:
+    if lookup_mode == "tool_agent":
+        if not api_key:
+            civitai_result = find_civitai_download(
+                filename=filename,
+                file_hash=file_hash,
+                base_url=civitai_base_url,
+                api_key=civitai_api_key,
+            )
+            steps = normalize_steps(civitai_result.get("steps"))
+            steps.append("Tool agent skipped: XAI_API_KEY not configured.")
+            return {
+                "found": bool(civitai_result.get("found")),
+                "url": civitai_result.get("url"),
+                "source": civitai_result.get("source"),
+                "notes": civitai_result.get("notes"),
+                "steps": steps,
+            }
+
+        from app.services.ai_tool_agent import run_tool_agent_lookup
+
+        return run_tool_agent_lookup(
+            base_url=base_url,
+            api_key=api_key,
+            model=model,
+            filename=filename,
+            relpath=relpath,
+            file_hash=file_hash,
+            civitai_base_url=civitai_base_url,
+            civitai_api_key=civitai_api_key,
+            huggingface_api_key=huggingface_api_key,
+            max_steps=tool_max_steps,
+            require_exact_filename=True,
+        )
+
+    civitai_result = find_civitai_download(
+        filename=filename,
+        file_hash=file_hash,
+        base_url=civitai_base_url,
+        api_key=civitai_api_key,
+    )
+
+    if civitai_result.get("found") and civitai_result.get("url"):
+        return {
+            "found": True,
+            "url": civitai_result.get("url"),
+            "source": civitai_result.get("source") or "civitai",
+            "notes": civitai_result.get("notes"),
+            "steps": normalize_steps(civitai_result.get("steps")),
+        }
+
+    if not api_key:
+        steps = normalize_steps(civitai_result.get("steps"))
+        steps.append("xAI lookup skipped: XAI_API_KEY not configured.")
+        return {
+            "found": False,
+            "url": None,
+            "source": None,
+            "notes": None,
+            "steps": steps,
+        }
+
+    xai_result = call_xai_lookup(
+        base_url=base_url,
+        api_key=api_key,
+        model=model,
+        filename=filename,
+        relpath=relpath,
+    )
+
+    combined_steps = []
+    combined_steps.extend(normalize_steps(civitai_result.get("steps")))
+    combined_steps.extend(normalize_steps(xai_result.get("steps")))
+    xai_result["steps"] = combined_steps
+    return xai_result
