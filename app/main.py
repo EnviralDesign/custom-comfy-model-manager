@@ -39,11 +39,17 @@ async def lifespan(app: FastAPI):
     from app.services.worker import get_worker
     worker = get_worker()
     await worker.start()
+
+    # Start AI lookup worker
+    from app.services.ai_lookup_worker import get_ai_lookup_worker
+    ai_worker = get_ai_lookup_worker()
+    await ai_worker.start()
     
     yield
     
     # Shutdown
     await worker.stop()
+    await ai_worker.stop()
     print("Shutting down...")
 
 
@@ -139,6 +145,12 @@ async def bundles_page(request: Request):
     return templates.TemplateResponse("bundles.html", {"request": request})
 
 
+@app.get("/ai-review", response_class=HTMLResponse)
+async def ai_review_page(request: Request):
+    """AI lookup review view."""
+    return templates.TemplateResponse("ai_review.html", {"request": request})
+
+
 # ============================================================================
 # API Routes (imported from routers)
 # ============================================================================
@@ -154,6 +166,8 @@ app.include_router(queue_router.router, prefix="/api/queue", tags=["queue"])
 app.include_router(dedupe_router.router, prefix="/api/dedupe", tags=["dedupe"])
 app.include_router(sources_router.router, prefix="/api/index", tags=["sources"])
 app.include_router(bundles_router.router, prefix="/api", tags=["bundles"])
+from app.routers import ai_lookup as ai_lookup_router
+app.include_router(ai_lookup_router.router, prefix="/api/ai", tags=["ai-lookup"])
 
 from app.routers import remote as remote_router
 from app.routers import remote_assets

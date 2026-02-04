@@ -11,6 +11,7 @@ const Sync = {
     sourceUrls: new Map(),   // hash -> {url, added_at, notes}
     bundles: [],             // List of bundle names for quick add
     activeSourceContext: null,
+    minMetricSizeBytes: 1024 * 1024,
 
     async init() {
         this.bindEvents();
@@ -347,8 +348,9 @@ const Sync = {
             // Force expand folders if searching so results are visible
             const isExpanded = filter ? true : this.expandedFolders.has(folderPath);
 
-            // Count items in folder (for display)
-            const itemCount = this.countItems(folder);
+            // Count items and derive status metrics for display
+            const folderMetrics = this.getFolderMetrics(folder);
+            const itemCount = folderMetrics.total;
 
             // Get folder diff status
             const folderStatus = this.getFolderStatus(folder);
@@ -363,6 +365,15 @@ const Sync = {
             const showSyncToLake = folderStatus.hasOnlyLocal;
             const showSyncToLocal = folderStatus.hasOnlyLake;
             const showVerify = folderStatus.hasProbableSame;
+
+            const hashComplete = folderMetrics.total > 0 && folderMetrics.hashed === folderMetrics.total;
+            const linkComplete = folderMetrics.total > 0 && folderMetrics.linked === folderMetrics.total;
+            const metricsHtml = folderMetrics.total > 0
+                ? `<span class="folder-metrics">
+                        <span class="folder-metric ${hashComplete ? 'complete' : ''}" title="Counts files ≥ 1 MB">hashed ${folderMetrics.hashed}/${folderMetrics.total}</span>
+                        <span class="folder-metric ${linkComplete ? 'complete' : ''}" title="Counts files ≥ 1 MB">linked ${folderMetrics.linked}/${folderMetrics.total}</span>
+                   </span>`
+                : '';
 
             html += `
                 <div class="diff-row diff-row-folder" data-path="${folderPath}" data-depth="${depth}">
@@ -381,8 +392,10 @@ const Sync = {
                         <span class="folder-icon">📁</span>
                         <span class="folder-name">${folderName}</span>
                         <span class="folder-count">(${itemCount})</span>
+                        ${metricsHtml}
                         <div class="path-actions">
                             ${showVerify ? `<button class="btn-verify" data-action="verify-folder" data-folder="${folderPath}" title="Verify hashes for this folder">✓?</button>` : ''}
+                            <button class="btn-ai-lookup" data-action="ai-lookup-folder" data-folder="${folderPath}" title="AI lookup source URLs for this folder">✨</button>
                             <button class="btn-add-bundle" data-action="add-folder-to-bundle" data-folder="${folderPath}" title="Add all in folder to bundle">📦</button>
                         </div>
                     </div>
@@ -479,6 +492,42 @@ const Sync = {
             count += this.countItems(child);
         }
         return count;
+    },
+
+    getFolderMetrics(node) {
+        let total = 0;
+        let hashed = 0;
+        let linked = 0;
+
+        const visit = (n) => {
+            for (const file of n.files) {
+                if (!this.isMetricFile(file)) continue;
+                total += 1;
+                const fileHash = file.lake_hash || file.local_hash;
+                if (fileHash) hashed += 1;
+
+                const hasSourceUrlByHash = fileHash && this.sourceUrls.has(fileHash);
+                const hasSourceUrlByRelpath = this.sourceUrlsByRelpath?.has(file.relpath);
+                if (hasSourceUrlByHash || hasSourceUrlByRelpath) linked += 1;
+            }
+            for (const child of Object.values(n.children)) {
+                visit(child);
+            }
+        };
+        visit(node);
+
+        return { total, hashed, linked };
+    },
+
+    isMetricFile(file) {
+        const size = this.getEntrySize(file);
+        return size >= this.minMetricSizeBytes;
+    },
+
+    getEntrySize(file) {
+        if (typeof file.lake_size === 'number' && file.lake_size > 0) return file.lake_size;
+        if (typeof file.local_size === 'number' && file.local_size > 0) return file.local_size;
+        return 0;
     },
 
     getFolderStatus(node) {
@@ -613,6 +662,13 @@ const Sync = {
             const relpath = target.dataset.relpath;
             const filename = target.dataset.filename;
             this.openSourceUrlModal(hash, relpath, filename);
+            return;
+        }
+
+        // AI lookup for folder
+        if (target.dataset.action === 'ai-lookup-folder') {
+            const folderPath = target.dataset.folder || '';
+            this.enqueueFolderAiLookup(folderPath);
             return;
         }
 
@@ -842,6 +898,58 @@ const Sync = {
         }
     },
 
+    async enqueueAiLookups(items) {
+        if (!items || items.length === 0) {
+            alert('No eligible files found for AI lookup.');
+            return;
+        }
+
+        try {
+            const res = await App.api('POST', '/ai/lookup/jobs', { items });
+            const created = res.created || 0;
+            const skipped = res.skipped || 0;
+            let msg = `Queued ${created} AI lookup job${created === 1 ? '' : 's'}.`;
+            if (skipped) {
+                msg += ` Skipped ${skipped} existing job${skipped === 1 ? '' : 's'}.`;
+            }
+            msg += ' Review results in the AI Review tab.';
+            alert(msg);
+        } catch (err) {
+            alert('Failed to enqueue AI lookups: ' + err.message);
+        }
+    },
+
+    enqueueFolderAiLookup(folderPath) {
+        const prefix = folderPath ? `${folderPath}/` : '';
+        const candidates = this.diffData.filter(entry => {
+            if (folderPath) {
+                if (!(entry.relpath === folderPath || entry.relpath.startsWith(prefix))) return false;
+            }
+            if (!this.isMetricFile(entry)) return false;
+            const fileHash = entry.lake_hash || entry.local_hash;
+            const hasSourceUrlByHash = fileHash && this.sourceUrls.has(fileHash);
+            const hasSourceUrlByRelpath = this.sourceUrlsByRelpath?.has(entry.relpath);
+            return !(hasSourceUrlByHash || hasSourceUrlByRelpath);
+        });
+
+        if (candidates.length === 0) {
+            alert('No files without source URLs found in this folder.');
+            return;
+        }
+
+        const displayPath = folderPath || '(root)';
+        const confirmed = confirm(`This will spawn ${candidates.length} AI searches for files in:\n${displayPath}\n\nContinue?`);
+        if (!confirmed) return;
+
+        const items = candidates.map(entry => ({
+            filename: entry.relpath.split('/').pop(),
+            relpath: entry.relpath,
+            file_hash: entry.lake_hash || entry.local_hash || null,
+        }));
+
+        this.enqueueAiLookups(items);
+    },
+
     // ==================== Source URL Modal ====================
 
     openSourceUrlModal(hash, relpath, filename) {
@@ -945,43 +1053,38 @@ const Sync = {
         const context = this.activeSourceContext;
         if (!context?.filename) return;
 
-        const input = document.getElementById('source-url-input');
         const resultDiv = document.getElementById('ai-lookup-result');
         const aiBtn = document.getElementById('source-url-ai');
 
-        if (!input || !resultDiv || !aiBtn) return;
+        if (!resultDiv || !aiBtn) return;
 
         aiBtn.disabled = true;
         aiBtn.textContent = '✨ Searching...';
         resultDiv.style.display = 'block';
         resultDiv.style.color = 'var(--text-muted)';
-        resultDiv.textContent = 'Searching the web with Grok...';
+        resultDiv.textContent = 'Queued AI lookup. You can review progress in the AI Review tab.';
 
         try {
-            const res = await App.api('POST', '/index/sources/ai-lookup', {
-                filename: context.filename,
-                relpath: context.relpath || '',
+            const res = await App.api('POST', '/ai/lookup/jobs', {
+                items: [
+                    {
+                        filename: context.filename,
+                        relpath: context.relpath || null,
+                        file_hash: context.hash || null,
+                    }
+                ]
             });
 
-            if (res.accepted && res.url) {
-                input.value = res.url;
-                resultDiv.style.color = 'var(--success)';
-                const sizeStr = res.validation?.size
-                    ? ` (${(res.validation.size / (1024 * 1024)).toFixed(1)} MB)`
-                    : '';
-                const statusStr = res.validation?.status ? `HTTP ${res.validation.status}` : 'validated';
-                resultDiv.textContent = `✅ Found exact match and validated (${statusStr}${sizeStr}).`;
-                return;
+            const created = res.created || 0;
+            const skipped = res.skipped || 0;
+            resultDiv.style.color = 'var(--text-secondary)';
+            if (created > 0) {
+                resultDiv.textContent = `✅ Queued ${created} AI lookup job. Check AI Review for updates.`;
+            } else if (skipped > 0) {
+                resultDiv.textContent = 'ℹ️ An AI lookup is already queued or completed for this file. Check AI Review.';
+            } else {
+                resultDiv.textContent = 'No job created.';
             }
-
-            if (!res.found) {
-                resultDiv.style.color = 'var(--text-muted)';
-                resultDiv.textContent = res.reason || 'No exact filename match found.';
-                return;
-            }
-
-            resultDiv.style.color = 'var(--warning)';
-            resultDiv.textContent = res.reason || 'Candidate URL failed validation.';
         } catch (err) {
             resultDiv.style.color = 'var(--danger)';
             resultDiv.textContent = `❌ ${err.message}`;

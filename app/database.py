@@ -83,6 +83,33 @@ CREATE TABLE IF NOT EXISTS source_urls (
 CREATE INDEX IF NOT EXISTS idx_source_urls_key ON source_urls(key);
 CREATE INDEX IF NOT EXISTS idx_source_urls_relpath ON source_urls(relpath) WHERE relpath IS NOT NULL;
 
+-- AI lookup jobs: background Grok web search and review workflow
+CREATE TABLE IF NOT EXISTS ai_lookup_jobs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    status TEXT NOT NULL CHECK (status IN ('pending', 'running', 'completed', 'failed', 'cancelled')),
+    decision TEXT CHECK (decision IN ('approved', 'rejected')),
+    filename TEXT NOT NULL,
+    relpath TEXT,
+    file_hash TEXT,
+    model TEXT,
+    found INTEGER DEFAULT 0,
+    accepted INTEGER DEFAULT 0,
+    candidate_url TEXT,
+    candidate_source TEXT,
+    candidate_notes TEXT,
+    validation_json TEXT,
+    steps_json TEXT,
+    error_message TEXT,
+    created_at TEXT NOT NULL,
+    started_at TEXT,
+    completed_at TEXT,
+    decision_at TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_ai_lookup_status ON ai_lookup_jobs(status);
+CREATE INDEX IF NOT EXISTS idx_ai_lookup_decision ON ai_lookup_jobs(decision);
+CREATE INDEX IF NOT EXISTS idx_ai_lookup_relpath ON ai_lookup_jobs(relpath);
+
 -- Bundles: named collections of model files
 CREATE TABLE IF NOT EXISTS bundles (
     id INTEGER PRIMARY KEY AUTOINCREMENT,

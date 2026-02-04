@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI Review - ComfyUI Model Manager</title>
+    <link rel="stylesheet" href="/static/css/style.css">
+    <script src="/static/js/htmx.min.js"></script>
+</head>
+
+<body>
+    <nav class="top-bar">
+        <div class="logo">
+            <span class="logo-icon">⚡</span>
+            <span class="logo-text">ComfyUI Model Manager</span>
+        </div>
+        <div class="nav-links">
+            <a href="/sync" class="nav-link">Sync</a>
+            <a href="/bundles" class="nav-link">Bundles</a>
+            <a href="/dedupe" class="nav-link">Dedupe</a>
+            <a href="/ai-review" class="nav-link active">AI Review</a>
+            <a href="/remote" class="nav-link">Remote</a>
+        </div>
+        <div class="nav-actions">
+            <button class="btn btn-secondary" id="ai-refresh-btn">🔄 Refresh</button>
+            <button class="btn" id="ai-toggle-decided">Show decided</button>
+        </div>
+    </nav>
+
+    <main class="dedupe-layout">
+        <div class="dedupe-container">
+            <div class="dedupe-step">
+                <div class="wizard-header" style="display: flex; justify-content: space-between; align-items: start;">
+                    <div>
+                        <h2>AI Source URL Review</h2>
+                        <span class="wizard-progress">Pending reviews: <span id="ai-review-count">0</span></span>
+                    </div>
+                </div>
+
+                <div id="ai-review-list" class="ai-review-list">
+                    <div class="text-secondary text-sm">Loading AI lookup jobs...</div>
+                </div>
+            </div>
+        </div>
+    </main>
+
+    <script src="/static/js/app.js"></script>
+    <script src="/static/js/ai_review.js"></script>
+</body>
+
+</html>

@@ -430,6 +430,37 @@ a:hover {
     margin-left: 4px;
 }
 
+.folder-metrics {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    margin-left: 10px;
+    font-size: 11px;
+    color: var(--text-muted);
+}
+
+.folder-metric {
+    position: relative;
+    padding: 2px 8px;
+    border-radius: 999px;
+}
+
+.folder-metric:not(:first-child)::before {
+    content: "";
+    position: absolute;
+    left: -5px;
+    top: 4px;
+    bottom: 4px;
+    width: 1px;
+    background: var(--border);
+}
+
+.folder-metric.complete {
+    color: #34d399;
+    background: rgba(34, 197, 94, 0.15);
+    border: 1px solid rgba(34, 197, 94, 0.35);
+}
+
 /* Presence indicator bar - replaces dots */
 .presence-bar {
     width: 4px;
@@ -973,6 +1004,14 @@ a:hover {
     color: var(--text-muted);
 }
 
+.text-secondary {
+    color: var(--text-secondary);
+}
+
+.text-sm {
+    font-size: 12px;
+}
+
 .text-success {
     color: var(--success);
 }
@@ -1057,6 +1096,35 @@ a:hover {
     color: white;
 }
 
+/* ========== AI Lookup Button ========== */
+.btn-ai-lookup {
+    background: transparent;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    color: var(--text-muted);
+    width: 24px;
+    height: 20px;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 11px;
+    margin-left: 6px;
+    opacity: 0;
+    transition: all 0.15s;
+}
+
+.diff-row:hover .btn-ai-lookup {
+    opacity: 0.5;
+}
+
+.btn-ai-lookup:hover {
+    opacity: 1 !important;
+    background: rgba(245, 158, 11, 0.8);
+    border-color: #fbbf24;
+    color: white;
+}
+
 /* ========== Hash File Button ========== */
 .btn-hash-file {
     background: transparent;
@@ -1111,7 +1179,7 @@ a:hover {
     background: var(--bg-secondary);
     border: 1px solid var(--border);
     border-radius: var(--radius-lg);
-    width: 500px;
+    width: 640px;
     max-width: 90vw;
     box-shadow: var(--shadow);
     transform: translateY(-20px);
@@ -1214,6 +1282,120 @@ a:hover {
     padding: 16px 20px;
     border-top: 1px solid var(--border);
     justify-content: flex-end;
+}
+
+.modal-footer .btn {
+    height: 34px;
+    min-width: 96px;
+    padding: 0 14px;
+    align-items: center;
+}
+
+/* ========== AI Review ========== */
+.ai-review-list {
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+    margin-top: 16px;
+}
+
+.ai-review-card {
+    background: var(--bg-secondary);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-lg);
+    padding: 16px;
+}
+
+.ai-review-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    margin-bottom: 8px;
+}
+
+.ai-review-title {
+    font-weight: 600;
+    font-size: 14px;
+}
+
+.ai-review-meta {
+    font-size: 12px;
+    color: var(--text-muted);
+    margin-bottom: 10px;
+    font-family: var(--font-mono);
+    word-break: break-all;
+}
+
+.ai-review-url {
+    font-size: 12px;
+    color: var(--text-secondary);
+    word-break: break-all;
+    margin-bottom: 10px;
+}
+
+.ai-review-steps {
+    background: var(--bg-tertiary);
+    border-radius: var(--radius-md);
+    padding: 10px 12px;
+    font-size: 12px;
+    color: var(--text-secondary);
+    margin-bottom: 12px;
+}
+
+.ai-review-steps ul {
+    list-style: none;
+    padding: 0;
+    margin: 0;
+}
+
+.ai-review-steps li {
+    padding: 4px 0;
+    border-bottom: 1px dashed var(--border);
+}
+
+.ai-review-steps li:last-child {
+    border-bottom: none;
+}
+
+.ai-review-actions {
+    display: flex;
+    gap: 10px;
+    flex-wrap: wrap;
+}
+
+.status-pill {
+    font-size: 11px;
+    padding: 4px 10px;
+    border-radius: 999px;
+    border: 1px solid transparent;
+    text-transform: uppercase;
+    letter-spacing: 0.4px;
+}
+
+.status-pill.pending,
+.status-pill.running {
+    background: rgba(99, 102, 241, 0.1);
+    color: #a5b4fc;
+    border-color: rgba(99, 102, 241, 0.3);
+}
+
+.status-pill.ready {
+    background: rgba(34, 197, 94, 0.1);
+    color: #34d399;
+    border-color: rgba(34, 197, 94, 0.3);
+}
+
+.status-pill.review {
+    background: rgba(245, 158, 11, 0.1);
+    color: #fbbf24;
+    border-color: rgba(245, 158, 11, 0.3);
+}
+
+.status-pill.failed {
+    background: rgba(239, 68, 68, 0.1);
+    color: #f87171;
+    border-color: rgba(239, 68, 68, 0.3);
 }
 
 /* ========== Scrollbar ========== */
