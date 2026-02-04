@@ -77,11 +77,15 @@ def classify_safetensors_header(header: dict, relpath: str | None = None) -> dic
     has_main_image_encoder = any(k.startswith("conditioner.main_image_encoder.") for k in keys)
     has_main_text_encoder = any(k.startswith("conditioner.main_text_encoder.") for k in keys)
     has_transformer_blocks = any(k.startswith("model.diffusion_model.transformer_blocks.") for k in keys)
+    has_transformer_blocks_root = any(k.startswith("transformer_blocks.") for k in keys)
+    has_dit_blocks = any(k.startswith("pipe.dit.blocks.") or k.startswith("dit.blocks.") for k in keys)
     has_audio_blocks = any(".audio_" in k or "audio_to_video_attn" in k or "video_to_audio_attn" in k for k in keys)
     has_wan_blocks = any(
         k.startswith("model.diffusion_model.blocks.")
         or k.startswith("diffusion_model.blocks.")
         or k.startswith("blocks.")
+        or k.startswith("pipe.dit.blocks.")
+        or k.startswith("dit.blocks.")
         for k in keys
     )
     has_wan_attn = any(".cross_attn." in k for k in keys)
@@ -109,6 +113,7 @@ def classify_safetensors_header(header: dict, relpath: str | None = None) -> dic
         or k.startswith("lora_")
         for k in keys
     )
+    has_lora_unet = any(k.startswith("lora_unet_") for k in keys)
     has_lora_te = any(
         ("text_encoder" in k or "lora_te" in k or "cond_stage_model" in k or "conditioner.embedders" in k)
         and "lora" in k
@@ -122,6 +127,12 @@ def classify_safetensors_header(header: dict, relpath: str | None = None) -> dic
     has_t2i_blocks = any(".block1." in k or ".block2." in k for k in keys)
     has_t2i_resnets = any(".resnets." in k for k in keys)
     has_t2i_in_conv = any(".in_conv." in k for k in keys)
+    has_flux_img_mlp = any(".img_mlp." in k for k in keys)
+    has_flux_txt_mlp = any(".txt_mlp." in k for k in keys)
+    has_flux_mod = any(".img_mod." in k or ".txt_mod." in k for k in keys)
+    has_flux_add_proj = any(
+        "add_k_proj" in k or "add_q_proj" in k or "add_v_proj" in k or "to_add_out" in k for k in keys
+    )
     controlnet_base_dim = None
     controlnet_sdxl_hint = False
     for k in keys:
@@ -450,13 +461,13 @@ def classify_safetensors_header(header: dict, relpath: str | None = None) -> dic
             tensor = header.get(k)
             if not isinstance(tensor, dict):
                 continue
-            dtype = tensor.get("dtype")
-            if dtype and not lora_dtype:
-                lora_dtype = dtype
 
             shape = tensor.get("shape")
             if not isinstance(shape, list) or len(shape) < 2:
                 continue
+            dtype = tensor.get("dtype")
+            if dtype and not lora_dtype:
+                lora_dtype = dtype
 
             if (
                 "attn2" in k
@@ -513,6 +524,23 @@ def classify_safetensors_header(header: dict, relpath: str | None = None) -> dic
             lora_base = "lora-sdxl"
             lora_base_score = max(lora_base_score, 0.86)
             lora_base_signals.append("lora:te1+te2")
+
+        # Flux-like LoRA (dual-stream DiT: img/txt MLPs with add_* projections)
+        if (
+            not lora_base
+            and has_transformer_blocks_root
+            and (has_flux_img_mlp or has_flux_txt_mlp or has_flux_mod)
+            and has_flux_add_proj
+        ):
+            lora_base = "lora-flux"
+            lora_base_score = max(lora_base_score, 0.84)
+            lora_base_signals.append("lora:flux_transformer")
+
+        # UNet-only LoRA without cross-attn context (ambiguous SD1/SD2 family)
+        if not lora_base and has_lora_unet and lora_channel_dim:
+            lora_base = "lora-sd1/2"
+            lora_base_score = max(lora_base_score, 0.72)
+            lora_base_signals.append("lora:unet_only")
 
         # Metadata hints for LoRA base
         meta = header.get("__metadata__")
