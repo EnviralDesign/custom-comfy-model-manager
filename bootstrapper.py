@@ -29,7 +29,10 @@ from urllib.parse import urlparse
 # --- CONFIGURATION (Paste from UI) ---
 BASE_URL = "https://dl.enviral-design.com"  # Set to your home app URL
 API_KEY = "PASTE_KEY_HERE"          # Set to your session key
+HF_API_KEY = os.environ.get("HF_API_KEY", "").strip()
+CIVITAI_API_KEY = os.environ.get("CIVITAI_API_KEY", "").strip()
 remote_root_dir = "~/comfy_remote"  # Where to install things
+BASE_HOST = urlparse(BASE_URL).netloc.lower()
 
 # --- CONSTANTS ---
 USER_AGENT = "ComfyRemoteAgent/0.1"
@@ -45,9 +48,14 @@ MODELS_DIR = COMFY_DIR / "models"
 # --- IMPORTS ---
 import requests
 
-session = requests.Session()
-session.headers.update({
+api_session = requests.Session()
+api_session.headers.update({
     "Authorization": f"Bearer {API_KEY}",
+    "User-Agent": USER_AGENT
+})
+
+download_session = requests.Session()
+download_session.headers.update({
     "User-Agent": USER_AGENT
 })
 
@@ -73,7 +81,7 @@ def register_agent():
                 "cwd": str(os.getcwd())
             }
         }
-        resp = session.post(f"{BASE_URL}/api/remote/agent/register", json=payload)
+        resp = api_session.post(f"{BASE_URL}/api/remote/agent/register", json=payload)
         resp.raise_for_status()
         log("✅ Agent registered successfully.")
     except Exception as e:
@@ -82,7 +90,7 @@ def register_agent():
 
 def get_next_task():
     try:
-        resp = session.get(f"{BASE_URL}/api/remote/tasks/next")
+        resp = api_session.get(f"{BASE_URL}/api/remote/tasks/next")
         if resp.status_code == 200:
             return resp.json() # Returns Task or None
         return None
@@ -97,9 +105,41 @@ def update_progress(task_id, status, progress=None, message=None, error=None):
     if error: payload["error"] = error
     
     try:
-        session.post(f"{BASE_URL}/api/remote/tasks/progress", json=payload)
+        api_session.post(f"{BASE_URL}/api/remote/tasks/progress", json=payload)
     except:
         pass
+
+# --- HELPERS ---
+
+def get_provider_from_url(url: str) -> str:
+    try:
+        host = urlparse(url).netloc.lower()
+    except Exception:
+        return "unknown"
+    if host.endswith("huggingface.co") or host.endswith("hf.co"):
+        return "huggingface"
+    if host.endswith("civitai.com"):
+        return "civitai"
+    return "unknown"
+
+def auth_headers_for_source(provider: str, url: str) -> dict:
+    if provider in {"local", "lake", "app"}:
+        return {"Authorization": f"Bearer {API_KEY}"}
+
+    host = None
+    try:
+        host = urlparse(url).netloc.lower()
+    except Exception:
+        host = None
+
+    if host and BASE_HOST and host == BASE_HOST:
+        return {"Authorization": f"Bearer {API_KEY}"}
+
+    if provider == "huggingface" and HF_API_KEY:
+        return {"Authorization": f"Bearer {HF_API_KEY}"}
+    if provider == "civitai" and CIVITAI_API_KEY:
+        return {"Authorization": f"Bearer {CIVITAI_API_KEY}"}
+    return {}
 
 # --- TASK HANDLERS ---
 
@@ -174,15 +214,17 @@ def handle_create_venv(task):
         log(f"Venv error: {e}", error=True)
         update_progress(task['id'], "failed", 0.0, str(e), error=str(e))
 
-def download_from_source(url, dest_path, task_id, existing_size=0):
+def download_from_source(url, dest_path, task_id, existing_size=0, extra_headers=None):
     headers = {}
+    if extra_headers:
+        headers.update(extra_headers)
     mode = 'wb'
     if existing_size > 0:
         headers['Range'] = f'bytes={existing_size}-'
         mode = 'ab'
         
     try:
-        with session.get(url, headers=headers, stream=True, timeout=STALL_TIMEOUT) as r:
+        with download_session.get(url, headers=headers, stream=True, timeout=STALL_TIMEOUT) as r:
             r.raise_for_status()
             
             # Handle potential 416 (Range Not Satisfiable) if file is already complete?
@@ -223,7 +265,7 @@ def handle_download(task):
     
     # 1. Resolve sources via App
     try:
-        resolve_resp = session.post(f"{BASE_URL}/api/remote/assets/resolve", 
+        resolve_resp = api_session.post(f"{BASE_URL}/api/remote/assets/resolve", 
                                   params={"hash": file_hash, "relpath": relpath})
         resolve_resp.raise_for_status()
         resolution = resolve_resp.json()
@@ -260,14 +302,27 @@ def handle_download(task):
     
     for src in sources:
         url = src['url']
+        provider = (src.get("provider") or get_provider_from_url(url)).lower()
+        requires_auth = bool(src.get("requires_auth", False))
+        if provider == "huggingface" and not HF_API_KEY:
+            log("Skipping Hugging Face source (no HF key provided).")
+            continue
+        if provider == "civitai" and not CIVITAI_API_KEY:
+            log("Skipping Civitai source (no Civitai key provided).")
+            continue
+        if requires_auth and provider == "unknown":
+            log("Skipping source that requires auth (unknown provider).")
+            continue
+
         log(f"Trying source ({src['type']}): {url}")
         
         # Resume support logic
         current_size = 0
         if temp_dest.exists():
             current_size = temp_dest.stat().st_size
-            
-        ok, err = download_from_source(url, temp_dest, task['id'], current_size)
+
+        headers = auth_headers_for_source(provider, url)
+        ok, err = download_from_source(url, temp_dest, task['id'], current_size, extra_headers=headers)
         
         if ok:
             temp_dest.rename(final_dest)
@@ -322,7 +377,16 @@ def handle_download_urls(task):
         if temp_dest.exists():
             current_size = temp_dest.stat().st_size
 
-        ok, err = download_from_source(url, temp_dest, task['id'], current_size)
+        provider = get_provider_from_url(url)
+        if provider == "huggingface" and not HF_API_KEY:
+            log(f"Skipping Hugging Face URL (no HF key provided): {relpath}")
+            continue
+        if provider == "civitai" and not CIVITAI_API_KEY:
+            log(f"Skipping Civitai URL (no Civitai key provided): {relpath}")
+            continue
+
+        headers = auth_headers_for_source(provider, url)
+        ok, err = download_from_source(url, temp_dest, task['id'], current_size, extra_headers=headers)
         
         if ok:
             temp_dest.rename(dest_path)
@@ -336,7 +400,7 @@ def handle_download_urls(task):
 # --- MAIN LOOP ---
 
 def main():
-    global API_KEY
+    global API_KEY, HF_API_KEY, CIVITAI_API_KEY
     
     # Prompt for key if not baked in
     if API_KEY == "PASTE_KEY_HERE" or not API_KEY:
@@ -351,8 +415,24 @@ def main():
             API_KEY = val
             
             # Update session headers with the new key
-            session.headers.update({"Authorization": f"Bearer {API_KEY}"})
+            api_session.headers.update({"Authorization": f"Bearer {API_KEY}"})
             
+        except KeyboardInterrupt:
+            return
+
+    if not HF_API_KEY:
+        try:
+            val = input("Enter Hugging Face API Key (optional, press Enter to skip): ").strip()
+            if val:
+                HF_API_KEY = val
+        except KeyboardInterrupt:
+            return
+
+    if not CIVITAI_API_KEY:
+        try:
+            val = input("Enter Civitai API Key (optional, press Enter to skip): ").strip()
+            if val:
+                CIVITAI_API_KEY = val
         except KeyboardInterrupt:
             return
 
@@ -364,7 +444,7 @@ def main():
     while True:
         try:
             # 1. Heartbeat
-            session.post(f"{BASE_URL}/api/remote/agent/heartbeat")
+            api_session.post(f"{BASE_URL}/api/remote/agent/heartbeat")
             
             # 2. Get Task (with long-polling timeout on server side)
             task = get_next_task()

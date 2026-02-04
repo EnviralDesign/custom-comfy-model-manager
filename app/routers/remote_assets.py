@@ -1,6 +1,7 @@
 """API Router for Remote Assets (Serving & Resolution)."""
 
 from pathlib import Path
+from urllib.parse import urlparse
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel
 from typing import List, Optional
@@ -17,6 +18,9 @@ class AssetSource(BaseModel):
     url: str
     type: str  # "web", "local", "lake"
     priority: int
+    host: Optional[str] = None
+    provider: Optional[str] = None  # "huggingface", "civitai", "unknown", "local", "lake"
+    requires_auth: Optional[bool] = None
 
 class AssetResolution(BaseModel):
     hash: str
@@ -41,10 +45,34 @@ async def resolve_asset(
     # 1. Base Resolution
     sources = []
     
+    def classify_source(url: str) -> tuple[Optional[str], str, bool]:
+        try:
+            host = urlparse(url).netloc.lower()
+        except Exception:
+            host = None
+        provider = "unknown"
+        requires_auth = False
+        if host:
+            if host.endswith("huggingface.co") or host.endswith("hf.co"):
+                provider = "huggingface"
+                requires_auth = True
+            elif host.endswith("civitai.com"):
+                provider = "civitai"
+                requires_auth = True
+        return host, provider, requires_auth
+
     # 2. Check Web Source (Metadata)
     meta = await source_mgr.get_source(hash)
     if meta:
-        sources.append(AssetSource(url=meta.url, type="web", priority=1))
+        host, provider, requires_auth = classify_source(meta.url)
+        sources.append(AssetSource(
+            url=meta.url,
+            type="web",
+            priority=1,
+            host=host,
+            provider=provider,
+            requires_auth=requires_auth,
+        ))
         
     # 3. Check Local & Lake Presence (via Index/Filesystem)
     # For now, we construct the URLs assuming the file exists at the given relpath.
@@ -66,19 +94,27 @@ async def resolve_asset(
         # Local
         local_path = settings.local_models_root / relpath
         if local_path.exists():
+            local_host = urlparse(base_url).netloc.lower()
             sources.append(AssetSource(
                 url=f"{base_url}/api/remote/assets/file?side=local&relpath={relpath}",
                 type="local",
-                priority=2
+                priority=2,
+                host=local_host,
+                provider="local",
+                requires_auth=False,
             ))
             
         # Lake
         lake_path = settings.lake_models_root / relpath
         if lake_path.exists():
+            lake_host = urlparse(base_url).netloc.lower()
             sources.append(AssetSource(
                 url=f"{base_url}/api/remote/assets/file?side=lake&relpath={relpath}",
                 type="lake",
-                priority=3
+                priority=3,
+                host=lake_host,
+                provider="lake",
+                requires_auth=False,
             ))
 
     return AssetResolution(
