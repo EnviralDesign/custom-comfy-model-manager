@@ -4,9 +4,12 @@ from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
 from typing import Literal
 from datetime import datetime
+from pathlib import Path
 
 from app.services.indexer import IndexerService
 from app.services.differ import compute_diff, DiffEntry
+from app.services.safetensors import read_safetensors_header, SafetensorsHeaderError
+from app.config import get_settings
 
 router = APIRouter()
 
@@ -115,6 +118,60 @@ async def get_stats():
     return {
         "local": local_stats,
         "lake": lake_stats,
+    }
+
+
+@router.get("/safetensors/header")
+async def get_safetensors_header(
+    relpath: str = Query(...),
+    side: Literal["local", "lake", "auto"] = "auto",
+):
+    """
+    Read the JSON header from a .safetensors file.
+    """
+    relpath = relpath.strip()
+    if not relpath:
+        raise HTTPException(status_code=400, detail="relpath is required")
+    if ".." in relpath or relpath.startswith("/") or "\\" in relpath:
+        raise HTTPException(status_code=400, detail="Invalid relpath")
+    if not relpath.lower().endswith(".safetensors"):
+        raise HTTPException(status_code=400, detail="Not a .safetensors file")
+
+    settings = get_settings()
+    roots: list[tuple[str, Path]] = []
+    if side == "local":
+        roots = [("local", settings.local_models_root)]
+    elif side == "lake":
+        roots = [("lake", settings.lake_models_root)]
+    else:
+        roots = [("local", settings.local_models_root), ("lake", settings.lake_models_root)]
+
+    chosen_side = None
+    file_path = None
+    for side_name, root in roots:
+        root_path = root
+        candidate = (root_path / relpath).resolve()
+        if not str(candidate).startswith(str(root_path.resolve())):
+            continue
+        if candidate.exists() and candidate.is_file():
+            chosen_side = side_name
+            file_path = candidate
+            break
+
+    if not file_path:
+        raise HTTPException(status_code=404, detail="File not found")
+
+    try:
+        header = read_safetensors_header(file_path)
+    except SafetensorsHeaderError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to read header: {exc}")
+
+    return {
+        "relpath": relpath,
+        "side": chosen_side,
+        "header": header,
     }
 
 

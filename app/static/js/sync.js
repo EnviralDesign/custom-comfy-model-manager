@@ -11,6 +11,9 @@ const Sync = {
     sourceUrls: new Map(),   // hash -> {url, added_at, notes}
     bundles: [],             // List of bundle names for quick add
     activeSourceContext: null,
+    confirmModal: null,
+    confirmResolve: null,
+    confirmElements: null,
     minMetricSizeBytes: 5 * 1024 * 1024,
 
     async init() {
@@ -453,6 +456,12 @@ const Sync = {
                 ? `<button class="btn-hash-file" data-action="hash-file" data-relpath="${file.relpath}" title="Compute hash for this file">#️⃣</button>`
                 : '';
 
+            const isSafetensors = this.isSafetensorsFile(file.filename);
+            const safetensorsSide = hasLocal ? 'local' : (hasLake ? 'lake' : 'auto');
+            const safetensorsBtn = isSafetensors
+                ? `<button class="btn-safetensors" data-action="safetensors-header" data-relpath="${file.relpath}" data-side="${safetensorsSide}" title="View safetensors header JSON">ST</button>`
+                : '';
+
             // URL and Bundle buttons
             const sourceUrlBtn = `<button class="btn-source-url ${hasSourceUrl ? 'has-url' : ''}" data-action="source-url" data-hash="${fileHash || ''}" data-relpath="${file.relpath}" data-filename="${file.filename}" title="${hasSourceUrl ? 'Edit source URL' : 'Add source URL'}">🔗</button>`;
             const bundleBtn = `<button class="btn-add-bundle" data-action="add-to-bundle" data-hash="${fileHash || ''}" data-relpath="${file.relpath}" data-filename="${file.filename}" title="Add to bundle">📦</button>`;
@@ -474,6 +483,7 @@ const Sync = {
                         <div class="path-actions">
                             ${isProbableSame ? `<button class="btn-verify btn-verify-file" data-action="verify-file" data-relpath="${file.relpath}" title="Verify hash">✓?</button>` : ''}
                             ${hashBtn}
+                            ${safetensorsBtn}
                             ${sourceUrlBtn}
                             ${bundleBtn}
                         </div>
@@ -556,6 +566,10 @@ const Sync = {
         if (typeof file.lake_size === 'number' && file.lake_size > 0) return file.lake_size;
         if (typeof file.local_size === 'number' && file.local_size > 0) return file.local_size;
         return 0;
+    },
+
+    isSafetensorsFile(filename) {
+        return typeof filename === 'string' && filename.toLowerCase().endsWith('.safetensors');
     },
 
     getFolderStatus(node) {
@@ -691,6 +705,14 @@ const Sync = {
             return;
         }
 
+        // Safetensors header button
+        if (target.dataset.action === 'safetensors-header') {
+            const relpath = target.dataset.relpath;
+            const side = target.dataset.side || 'auto';
+            this.openSafetensorsHeaderModal(relpath, side);
+            return;
+        }
+
         // Source URL button
         if (target.dataset.action === 'source-url') {
             const hash = target.dataset.hash;
@@ -750,7 +772,12 @@ const Sync = {
         }
 
         const displayPath = folderPath || '(root)';
-        const confirmed = confirm(`This will queue hash jobs for ${candidates.length} file(s) in:\n${displayPath}\n\nContinue?`);
+        const confirmed = await this.confirmAction({
+            title: 'Queue Hashes',
+            message: `This will queue hash jobs for ${candidates.length} file(s) in:\n${displayPath}\n\nContinue?`,
+            confirmText: 'Queue',
+            confirmClass: 'btn-primary',
+        });
         if (!confirmed) return;
 
         try {
@@ -862,9 +889,15 @@ const Sync = {
     },
 
     async enqueueDelete(side, relpath) {
-        if (!confirm(`Are you sure you want to delete this file from ${side}?\n\n${relpath}\n\nThis cannot be undone.`)) {
-            return;
-        }
+        const confirmed = await this.confirmAction({
+            title: 'Delete File',
+            message: `Are you sure you want to delete this file from ${side}?\n\n${relpath}\n\nThis cannot be undone.`,
+            confirmText: 'Delete',
+            confirmClass: 'btn-danger',
+            rememberKey: 'skip_delete_confirm',
+            rememberLabel: 'Do not ask again for deletes',
+        });
+        if (!confirmed) return;
 
         try {
             const result = await App.api('POST', '/queue/delete', {
@@ -903,7 +936,12 @@ const Sync = {
             return;
         }
 
-        const confirmed = confirm(`Copy ${filesToCopy.length} files from ${srcSide} to ${dstSide}?`);
+        const confirmed = await this.confirmAction({
+            title: 'Copy Folder',
+            message: `Copy ${filesToCopy.length} files from ${srcSide} to ${dstSide}?`,
+            confirmText: 'Copy',
+            confirmClass: 'btn-primary',
+        });
         if (!confirmed) return;
 
         try {
@@ -941,7 +979,14 @@ const Sync = {
             return;
         }
 
-        const confirmed = confirm(`Are you SURE you want to DELETE ${filesToDelete.length} files from ${side}?\n\nFolder: ${folderPath}\n\nThis cannot be undone.`);
+        const confirmed = await this.confirmAction({
+            title: 'Delete Folder',
+            message: `Are you SURE you want to DELETE ${filesToDelete.length} files from ${side}?\n\nFolder: ${folderPath}\n\nThis cannot be undone.`,
+            confirmText: 'Delete',
+            confirmClass: 'btn-danger',
+            rememberKey: 'skip_delete_confirm',
+            rememberLabel: 'Do not ask again for deletes',
+        });
         if (!confirmed) return;
 
         try {
@@ -984,7 +1029,7 @@ const Sync = {
         }
     },
 
-    enqueueFolderAiLookup(folderPath) {
+    async enqueueFolderAiLookup(folderPath) {
         const prefix = folderPath ? `${folderPath}/` : '';
         const candidates = this.diffData.filter(entry => {
             if (folderPath) {
@@ -1003,7 +1048,12 @@ const Sync = {
         }
 
         const displayPath = folderPath || '(root)';
-        const confirmed = confirm(`This will spawn ${candidates.length} AI searches for files in:\n${displayPath}\n\nContinue?`);
+        const confirmed = await this.confirmAction({
+            title: 'Start AI Lookup',
+            message: `This will spawn ${candidates.length} AI searches for files in:\n${displayPath}\n\nContinue?`,
+            confirmText: 'Start',
+            confirmClass: 'btn-primary',
+        });
         if (!confirmed) return;
 
         const items = candidates.map(entry => ({
@@ -1013,6 +1063,199 @@ const Sync = {
         }));
 
         this.enqueueAiLookups(items);
+    },
+
+    // ==================== Confirm Modal ====================
+
+    ensureConfirmModal() {
+        if (this.confirmModal) return this.confirmModal;
+
+        const modal = document.createElement('div');
+        modal.id = 'confirm-modal';
+        modal.className = 'modal-overlay';
+        modal.innerHTML = `
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h3 class="confirm-title">Confirm</h3>
+                    <button class="modal-close" data-action="confirm-close">×</button>
+                </div>
+                <div class="modal-body">
+                    <p class="confirm-message"></p>
+                    <label class="confirm-remember">
+                        <input type="checkbox" class="confirm-remember-checkbox" />
+                        <span class="confirm-remember-label"></span>
+                    </label>
+                </div>
+                <div class="modal-footer">
+                    <button class="btn" data-action="confirm-cancel">Cancel</button>
+                    <button class="btn btn-primary" data-action="confirm-ok">OK</button>
+                </div>
+            </div>
+        `;
+        document.body.appendChild(modal);
+
+        const title = modal.querySelector('.confirm-title');
+        const message = modal.querySelector('.confirm-message');
+        const remember = modal.querySelector('.confirm-remember');
+        const rememberCheckbox = modal.querySelector('.confirm-remember-checkbox');
+        const rememberLabel = modal.querySelector('.confirm-remember-label');
+        const okBtn = modal.querySelector('[data-action="confirm-ok"]');
+        const cancelBtn = modal.querySelector('[data-action="confirm-cancel"]');
+        const closeBtn = modal.querySelector('[data-action="confirm-close"]');
+
+        const close = (result) => {
+            modal.classList.remove('visible');
+            if (this.confirmResolve) {
+                const resolve = this.confirmResolve;
+                this.confirmResolve = null;
+                resolve(result);
+            }
+        };
+
+        okBtn.addEventListener('click', () => close(true));
+        cancelBtn.addEventListener('click', () => close(false));
+        closeBtn.addEventListener('click', () => close(false));
+        modal.addEventListener('click', (e) => {
+            if (e.target === modal) close(false);
+        });
+
+        this.confirmModal = modal;
+        this.confirmElements = {
+            title,
+            message,
+            remember,
+            rememberCheckbox,
+            rememberLabel,
+            okBtn,
+        };
+        return modal;
+    },
+
+    getRememberFlag(key) {
+        try {
+            return localStorage.getItem(key) === '1';
+        } catch (err) {
+            return false;
+        }
+    },
+
+    setRememberFlag(key, value) {
+        try {
+            if (value) {
+                localStorage.setItem(key, '1');
+            } else {
+                localStorage.removeItem(key);
+            }
+        } catch (err) {
+            // Ignore storage errors
+        }
+    },
+
+    confirmAction({
+        title = 'Confirm',
+        message = '',
+        confirmText = 'OK',
+        confirmClass = 'btn-primary',
+        rememberKey = null,
+        rememberLabel = '',
+    }) {
+        if (rememberKey && this.getRememberFlag(rememberKey)) {
+            return Promise.resolve(true);
+        }
+
+        this.ensureConfirmModal();
+        const { title: titleEl, message: messageEl, remember, rememberCheckbox, rememberLabel: rememberLabelEl, okBtn } = this.confirmElements;
+
+        titleEl.textContent = title;
+        messageEl.textContent = message;
+        okBtn.textContent = confirmText;
+        okBtn.className = `btn ${confirmClass}`;
+
+        if (rememberKey) {
+            remember.style.display = 'flex';
+            rememberCheckbox.checked = false;
+            rememberLabelEl.textContent = rememberLabel;
+        } else {
+            remember.style.display = 'none';
+            rememberCheckbox.checked = false;
+            rememberLabelEl.textContent = '';
+        }
+
+        this.confirmModal.classList.add('visible');
+
+        if (this.confirmResolve) {
+            const pending = this.confirmResolve;
+            this.confirmResolve = null;
+            pending(false);
+        }
+
+        return new Promise((resolve) => {
+            this.confirmResolve = (result) => {
+                if (result && rememberKey && rememberCheckbox.checked) {
+                    this.setRememberFlag(rememberKey, true);
+                }
+                resolve(result);
+            };
+        });
+    },
+
+    // ==================== Safetensors Header Modal ====================
+
+    async openSafetensorsHeaderModal(relpath, side = 'auto') {
+        let modal = document.getElementById('safetensors-header-modal');
+        if (!modal) {
+            modal = document.createElement('div');
+            modal.id = 'safetensors-header-modal';
+            modal.className = 'modal-overlay';
+            modal.innerHTML = `
+                <div class="modal-content">
+                    <div class="modal-header">
+                        <h3>Safetensors Header</h3>
+                        <button class="modal-close" onclick="Sync.closeSafetensorsHeaderModal()">×</button>
+                    </div>
+                    <div class="modal-body">
+                        <p class="modal-filename"></p>
+                        <p class="modal-hash safetensors-source"></p>
+                        <div class="safetensors-json">Loading...</div>
+                    </div>
+                    <div class="modal-footer">
+                        <button class="btn" onclick="Sync.closeSafetensorsHeaderModal()">Close</button>
+                    </div>
+                </div>
+            `;
+            document.body.appendChild(modal);
+
+            modal.addEventListener('click', (e) => {
+                if (e.target === modal) this.closeSafetensorsHeaderModal();
+            });
+        }
+
+        modal.querySelector('.modal-filename').textContent = `File: ${relpath}`;
+        const sourceEl = modal.querySelector('.safetensors-source');
+        sourceEl.textContent = side === 'auto' ? 'Source: auto' : `Source: ${side}`;
+
+        const jsonEl = modal.querySelector('.safetensors-json');
+        jsonEl.textContent = 'Loading...';
+
+        modal.classList.add('visible');
+
+        try {
+            const res = await App.api(
+                'GET',
+                `/index/safetensors/header?relpath=${encodeURIComponent(relpath)}&side=${encodeURIComponent(side)}`
+            );
+            sourceEl.textContent = `Source: ${res.side || side}`;
+            jsonEl.textContent = JSON.stringify(res.header, null, 2);
+        } catch (err) {
+            jsonEl.textContent = `Error: ${err.message}`;
+        }
+    },
+
+    closeSafetensorsHeaderModal() {
+        const modal = document.getElementById('safetensors-header-modal');
+        if (modal) {
+            modal.classList.remove('visible');
+        }
     },
 
     // ==================== Source URL Modal ====================
@@ -1223,7 +1466,13 @@ const Sync = {
                 ? "This URL looks like a webpage, not a direct file download. Remote downloads will likely fail.\n\nAre you sure you want to save it anyway?"
                 : "The link validation failed. Remote downloads will likely fail.\n\nAre you sure you want to save it anyway?";
 
-            if (!confirm(msg)) return;
+            const confirmed = await this.confirmAction({
+                title: 'Save Source URL',
+                message: msg,
+                confirmText: 'Save',
+                confirmClass: 'btn-primary',
+            });
+            if (!confirmed) return;
         }
 
         const hasHash = hash && hash.length > 0;
@@ -1261,9 +1510,13 @@ const Sync = {
     },
 
     async deleteSourceUrl(hash, relpath) {
-        if (!confirm('Remove the source URL for this file?')) {
-            return;
-        }
+        const confirmed = await this.confirmAction({
+            title: 'Remove Source URL',
+            message: 'Remove the source URL for this file?',
+            confirmText: 'Remove',
+            confirmClass: 'btn-danger',
+        });
+        if (!confirmed) return;
 
         const hasHash = hash && hash.length > 0;
         const existingByHash = hasHash ? this.sourceUrls.get(hash) : null;
