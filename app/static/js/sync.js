@@ -11,7 +11,7 @@ const Sync = {
     sourceUrls: new Map(),   // hash -> {url, added_at, notes}
     bundles: [],             // List of bundle names for quick add
     activeSourceContext: null,
-    minMetricSizeBytes: 1024 * 1024,
+    minMetricSizeBytes: 5 * 1024 * 1024,
 
     async init() {
         this.bindEvents();
@@ -354,6 +354,7 @@ const Sync = {
 
             // Get folder diff status
             const folderStatus = this.getFolderStatus(folder);
+            const folderHashStats = this.getFolderHashStats(folder);
 
             // If filtering, check if folder contains matching items
             const childContent = this.renderNode(folder, folderPath, filter, depth + 1);
@@ -370,9 +371,12 @@ const Sync = {
             const linkComplete = folderMetrics.total > 0 && folderMetrics.linked === folderMetrics.total;
             const metricsHtml = folderMetrics.total > 0
                 ? `<span class="folder-metrics">
-                        <span class="folder-metric ${hashComplete ? 'complete' : ''}" title="Counts files ≥ 1 MB">hashed ${folderMetrics.hashed}/${folderMetrics.total}</span>
-                        <span class="folder-metric ${linkComplete ? 'complete' : ''}" title="Counts files ≥ 1 MB">linked ${folderMetrics.linked}/${folderMetrics.total}</span>
+                        <span class="folder-metric ${hashComplete ? 'complete' : ''}" title="Counts files ≥ 5 MB">hashed ${folderMetrics.hashed}/${folderMetrics.total}</span>
+                        <span class="folder-metric ${linkComplete ? 'complete' : ''}" title="Counts files ≥ 5 MB">linked ${folderMetrics.linked}/${folderMetrics.total}</span>
                    </span>`
+                : '';
+            const hashFolderBtn = folderHashStats.missing > 0
+                ? `<button class="btn-hash-folder" data-action="hash-folder" data-folder="${folderPath}" title="Queue hash for ${folderHashStats.missing} file(s) in this folder">#️⃣</button>`
                 : '';
 
             html += `
@@ -395,6 +399,7 @@ const Sync = {
                         ${metricsHtml}
                         <div class="path-actions">
                             ${showVerify ? `<button class="btn-verify" data-action="verify-folder" data-folder="${folderPath}" title="Verify hashes for this folder">✓?</button>` : ''}
+                            ${hashFolderBtn}
                             <button class="btn-ai-lookup" data-action="ai-lookup-folder" data-folder="${folderPath}" title="AI lookup source URLs for this folder">✨</button>
                             <button class="btn-add-bundle" data-action="add-folder-to-bundle" data-folder="${folderPath}" title="Add all in folder to bundle">📦</button>
                         </div>
@@ -517,6 +522,25 @@ const Sync = {
         visit(node);
 
         return { total, hashed, linked };
+    },
+
+    getFolderHashStats(node) {
+        let total = 0;
+        let missing = 0;
+
+        const visit = (n) => {
+            for (const file of n.files) {
+                total += 1;
+                const fileHash = file.lake_hash || file.local_hash;
+                if (!fileHash) missing += 1;
+            }
+            for (const child of Object.values(n.children)) {
+                visit(child);
+            }
+        };
+        visit(node);
+
+        return { total, missing };
     },
 
     isMetricFile(file) {
@@ -642,6 +666,13 @@ const Sync = {
             return;
         }
 
+        // Hash folder button
+        if (target.dataset.action === 'hash-folder') {
+            const folderPath = target.dataset.folder || '';
+            this.enqueueFolderHash(folderPath);
+            return;
+        }
+
         // Verify file button
         if (target.dataset.action === 'verify-file') {
             const relpath = target.dataset.relpath;
@@ -696,6 +727,36 @@ const Sync = {
         } catch (err) {
             console.error('Failed to queue hash:', err);
             alert('Failed to queue hash: ' + err.message);
+        }
+    },
+
+    async enqueueFolderHash(folderPath) {
+        const prefix = folderPath ? `${folderPath}/` : '';
+        const candidates = this.diffData.filter(entry => {
+            if (folderPath) {
+                if (!(entry.relpath === folderPath || entry.relpath.startsWith(prefix))) return false;
+            }
+            const fileHash = entry.lake_hash || entry.local_hash;
+            return !fileHash;
+        });
+
+        if (candidates.length === 0) {
+            alert('No unhashed files found in this folder.');
+            return;
+        }
+
+        const displayPath = folderPath || '(root)';
+        const confirmed = confirm(`This will queue hash jobs for ${candidates.length} file(s) in:\n${displayPath}\n\nContinue?`);
+        if (!confirmed) return;
+
+        try {
+            for (const entry of candidates) {
+                await App.api('POST', `/index/hash-file?relpath=${encodeURIComponent(entry.relpath)}`);
+            }
+            App.loadQueueTasks();
+        } catch (err) {
+            console.error('Failed to queue folder hash:', err);
+            alert('Failed to queue folder hash: ' + err.message);
         }
     },
 

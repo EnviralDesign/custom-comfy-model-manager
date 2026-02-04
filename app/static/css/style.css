@@ -1126,7 +1126,8 @@ a:hover {
 }
 
 /* ========== Hash File Button ========== */
-.btn-hash-file {
+.btn-hash-file,
+.btn-hash-folder {
     background: transparent;
     border: 1px solid var(--border);
     border-radius: var(--radius-sm);
@@ -1142,11 +1143,13 @@ a:hover {
     transition: all 0.15s;
 }
 
-.diff-row:hover .btn-hash-file {
+.diff-row:hover .btn-hash-file,
+.diff-row:hover .btn-hash-folder {
     opacity: 0.5;
 }
 
-.btn-hash-file:hover {
+.btn-hash-file:hover,
+.btn-hash-folder:hover {
     opacity: 1 !important;
     background: var(--warning);
     border-color: var(--warning);
