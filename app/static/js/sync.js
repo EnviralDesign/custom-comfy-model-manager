@@ -367,16 +367,19 @@ const Sync = {
             const showSyncToLocal = folderStatus.hasOnlyLake;
             const showVerify = folderStatus.hasProbableSame;
 
+            const emptyMetrics = folderMetrics.total === 0;
             const hashComplete = folderMetrics.total > 0 && folderMetrics.hashed === folderMetrics.total;
             const linkComplete = folderMetrics.total > 0 && folderMetrics.linked === folderMetrics.total;
-            const metricsHtml = folderMetrics.total > 0
+            const sizeLabel = folderMetrics.totalBytes > 0 ? App.formatBytes(folderMetrics.totalBytes) : '';
+            const metricsHtml = folderMetrics.total > 0 || sizeLabel
                 ? `<span class="folder-metrics">
-                        <span class="folder-metric ${hashComplete ? 'complete' : ''}" title="Counts files ≥ 5 MB">hashed ${folderMetrics.hashed}/${folderMetrics.total}</span>
-                        <span class="folder-metric ${linkComplete ? 'complete' : ''}" title="Counts files ≥ 5 MB">linked ${folderMetrics.linked}/${folderMetrics.total}</span>
+                        <span class="folder-metric ${hashComplete ? 'complete' : ''} ${emptyMetrics ? 'empty' : ''}" title="${emptyMetrics ? 'No files ≥ 5 MB' : 'Counts files ≥ 5 MB'}">hashed ${folderMetrics.hashed}/${folderMetrics.total}</span>
+                        <span class="folder-metric ${linkComplete ? 'complete' : ''} ${emptyMetrics ? 'empty' : ''}" title="${emptyMetrics ? 'No files ≥ 5 MB' : 'Counts files ≥ 5 MB'}">linked ${folderMetrics.linked}/${folderMetrics.total}</span>
+                        ${sizeLabel ? `<span class="folder-metric" title="Total size across files">${sizeLabel}</span>` : ''}
                    </span>`
                 : '';
-            const hashFolderBtn = folderHashStats.missing > 0
-                ? `<button class="btn-hash-folder" data-action="hash-folder" data-folder="${folderPath}" title="Queue hash for ${folderHashStats.missing} file(s) in this folder">#️⃣</button>`
+            const hashFolderBtn = folderHashStats.total > 0
+                ? `<button class="btn-hash-folder" data-action="hash-folder" data-folder="${folderPath}" title="${folderHashStats.missing > 0 ? `Queue hash for ${folderHashStats.missing} file(s) in this folder` : 'All files already hashed'}">#️⃣</button>`
                 : '';
 
             html += `
@@ -395,7 +398,6 @@ const Sync = {
                         </span>
                         <span class="folder-icon">📁</span>
                         <span class="folder-name">${folderName}</span>
-                        <span class="folder-count">(${itemCount})</span>
                         ${metricsHtml}
                         <div class="path-actions">
                             ${showVerify ? `<button class="btn-verify" data-action="verify-folder" data-folder="${folderPath}" title="Verify hashes for this folder">✓?</button>` : ''}
@@ -503,9 +505,11 @@ const Sync = {
         let total = 0;
         let hashed = 0;
         let linked = 0;
+        let totalBytes = 0;
 
         const visit = (n) => {
             for (const file of n.files) {
+                totalBytes += this.getEntrySize(file);
                 if (!this.isMetricFile(file)) continue;
                 total += 1;
                 const fileHash = file.lake_hash || file.local_hash;
@@ -521,7 +525,7 @@ const Sync = {
         };
         visit(node);
 
-        return { total, hashed, linked };
+        return { total, hashed, linked, totalBytes };
     },
 
     getFolderHashStats(node) {
