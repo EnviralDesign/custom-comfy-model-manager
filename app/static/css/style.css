@@ -713,11 +713,69 @@ a:hover {
 
 /* File name styling */
 .file-name {
-    flex: 1;
+    flex: 0 1 auto;
+    min-width: 0;
+    max-width: clamp(160px, 45vw, 520px);
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
     font-size: 13px;
+}
+
+.file-meta {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+    flex: 1;
+}
+
+.file-tags {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    flex-shrink: 0;
+}
+
+.file-tag {
+    display: inline-flex;
+    align-items: center;
+    height: 18px;
+    padding: 0 6px;
+    border-radius: 999px;
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 0.3px;
+    color: var(--text-secondary);
+    border: 1px solid var(--border);
+    background: rgba(99, 102, 241, 0.12);
+}
+
+.file-tag.tag-low {
+    color: var(--text-muted);
+    border-color: var(--border);
+    background: rgba(148, 163, 184, 0.1);
+}
+
+.file-tag.tag-primary {
+    border-color: rgba(99, 102, 241, 0.45);
+    box-shadow: 0 0 0 1px rgba(99, 102, 241, 0.05);
+}
+
+.file-tag.tag-secondary {
+    opacity: 0.8;
+}
+
+.file-tag.tag-error {
+    color: var(--danger);
+    border-color: rgba(239, 68, 68, 0.5);
+    background: rgba(239, 68, 68, 0.1);
+}
+
+.file-tag.tag-pending {
+    color: var(--text-muted);
+    border-color: var(--border);
+    background: rgba(148, 163, 184, 0.08);
 }
 
 .file-size {

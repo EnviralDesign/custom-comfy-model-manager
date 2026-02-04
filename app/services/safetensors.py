@@ -39,3 +39,327 @@ def read_safetensors_header(path: Path, max_header_bytes: int = 8 * 1024 * 1024)
         return json.loads(header_bytes.decode("utf-8"))
     except Exception as exc:
         raise SafetensorsHeaderError("Header JSON is invalid.") from exc
+
+
+def classify_safetensors_header(header: dict, relpath: str | None = None) -> dict:
+    """
+    Classify a safetensors header using lightweight heuristics.
+    Returns tags, confidence, and matched signals.
+    """
+    keys = [k for k in header.keys() if k != "__metadata__"]
+    if not keys:
+        return {"tags": [], "confidence": 0.0, "signals": []}
+    relpath_text = (relpath or "").lower()
+
+    def has_prefix(prefix: str) -> bool:
+        return any(k.startswith(prefix) for k in keys)
+
+    has_unet = has_prefix("model.diffusion_model.")
+    has_vae = has_prefix("first_stage_model.")
+    has_cond = has_prefix("conditioner.")
+    has_text0 = has_prefix("conditioner.embedders.0.")
+    has_text1 = has_prefix("conditioner.embedders.1.")
+    has_dual_text = has_text0 and has_text1
+    has_cond_stage = has_prefix("cond_stage_model.")
+    has_double_blocks = has_prefix("model.diffusion_model.double_blocks.") or has_prefix("double_blocks.")
+    has_img_attn = any(".img_attn." in k for k in keys)
+    has_txt_attn = any(".txt_attn." in k for k in keys)
+    has_openclip = any(k.startswith("conditioner.embedders.0.model.") or k.startswith("conditioner.embedders.1.model.") for k in keys)
+    has_clip_text = any(
+        k.startswith("conditioner.embedders.0.transformer.text_model.")
+        or k.startswith("conditioner.embedders.1.transformer.text_model.")
+        or k.startswith("cond_stage_model.transformer.text_model.")
+        for k in keys
+    )
+    has_main_image_encoder = any(k.startswith("conditioner.main_image_encoder.") for k in keys)
+    has_main_text_encoder = any(k.startswith("conditioner.main_text_encoder.") for k in keys)
+    has_transformer_blocks = any(k.startswith("model.diffusion_model.transformer_blocks.") for k in keys)
+    has_audio_blocks = any(".audio_" in k or "audio_to_video_attn" in k or "video_to_audio_attn" in k for k in keys)
+    has_wan_blocks = any(
+        k.startswith("model.diffusion_model.blocks.") or k.startswith("blocks.")
+        for k in keys
+    )
+    has_wan_attn = any(".cross_attn." in k for k in keys)
+    has_cap_embedder = any(k.startswith("cap_embedder.") for k in keys)
+    has_context_refiner = any(k.startswith("context_refiner.") for k in keys)
+    has_noise_refiner = any(k.startswith("noise_refiner.") for k in keys)
+    has_adaln = any(".adaLN_modulation." in k for k in keys)
+    has_x_embedder = any(k.startswith("x_embedder.") for k in keys)
+    has_input_hint = any(k.startswith("input_hint_block.") for k in keys)
+    has_zero_convs = any(k.startswith("zero_convs.") for k in keys)
+    has_controlnet_prefix = any(k.startswith("controlnet.") for k in keys)
+    has_add_embedding = any(k.startswith("add_embedding.") for k in keys)
+    has_controlnet_cond_embedding = any(k.startswith("controlnet_cond_embedding.") for k in keys)
+    has_lora_controlnet = "lora_controlnet" in header
+    controlnet_base_dim = None
+    for k in keys:
+        if ".attn2.to_k.weight" in k:
+            tensor = header.get(k)
+            if isinstance(tensor, dict):
+                shape = tensor.get("shape")
+                if isinstance(shape, list) and len(shape) == 2:
+                    controlnet_base_dim = shape[1]
+                    break
+    if controlnet_base_dim is None:
+        add_key = "add_embedding.linear_1.weight"
+        tensor = header.get(add_key)
+        if isinstance(tensor, dict):
+            shape = tensor.get("shape")
+            if isinstance(shape, list) and len(shape) == 2:
+                controlnet_base_dim = shape[1]
+
+    signals = []
+    if has_unet:
+        signals.append("unet:model.diffusion_model")
+    if has_vae:
+        signals.append("vae:first_stage_model")
+    if has_text0:
+        signals.append("text:conditioner.embedders.0")
+    if has_text1:
+        signals.append("text:conditioner.embedders.1")
+
+    tags: list[dict] = []
+    signals_by_tag: dict[str, list[str]] = {}
+
+    def add_tag(name: str, score: float, tag_signals: list[str]):
+        if score <= 0:
+            return
+        tags.append({"name": name, "confidence": round(score, 3)})
+        signals_by_tag[name] = tag_signals
+
+    # SDXL detection (requires dual text encoders)
+    sdxl_score = 0.0
+    sdxl_signals = []
+    if has_dual_text:
+        sdxl_score = 0.65
+        sdxl_signals.append("sdxl:dual_text")
+    if has_dual_text and has_unet:
+        sdxl_score = 0.78
+        sdxl_signals.append("sdxl:unet")
+    if has_dual_text and has_unet and has_vae:
+        sdxl_score = 0.92
+        sdxl_signals.append("sdxl:vae")
+
+    # SD1/SD2 detection (cond_stage_model CLIP)
+    sd12_score = 0.0
+    sd12_signals = []
+    if has_cond_stage:
+        sd12_score = 0.6
+        sd12_signals.append("sd1:cond_stage")
+    if has_cond_stage and has_unet:
+        sd12_score = 0.75
+        sd12_signals.append("sd1:unet")
+    if has_cond_stage and has_unet and has_vae:
+        sd12_score = 0.88
+        sd12_signals.append("sd1:vae")
+
+    # Flux-like detection
+    flux_score = 0.0
+    flux_signals = []
+    if has_double_blocks:
+        flux_score = 0.7
+        flux_signals.append("flux:double_blocks")
+    if has_double_blocks and has_img_attn and has_txt_attn:
+        flux_score = 0.9
+        flux_signals.append("flux:img_txt_attn")
+
+    # SDXL refiner detection (OpenCLIP-only text)
+    sdxl_refiner_score = 0.0
+    sdxl_refiner_signals = []
+    if not has_dual_text and has_openclip:
+        sdxl_refiner_score = 0.72
+        sdxl_refiner_signals.append("sdxl-refiner:openclip")
+        if not has_clip_text:
+            sdxl_refiner_score = 0.82
+            sdxl_refiner_signals.append("sdxl-refiner:no_clip_text")
+        if has_unet:
+            sdxl_refiner_score = min(0.92, sdxl_refiner_score + 0.08)
+            sdxl_refiner_signals.append("sdxl-refiner:unet")
+        if has_vae:
+            sdxl_refiner_score = min(0.95, sdxl_refiner_score + 0.03)
+            sdxl_refiner_signals.append("sdxl-refiner:vae")
+
+    # Hunyuan3D detection
+    hunyuan_score = 0.0
+    hunyuan_signals = []
+    if has_main_image_encoder or has_main_text_encoder:
+        hunyuan_score = 0.85
+        hunyuan_signals.append("hunyuan:main_encoder")
+        if has_main_image_encoder and has_main_text_encoder:
+            hunyuan_score = 0.9
+            hunyuan_signals.append("hunyuan:dual_encoder")
+
+    # LTX-2 / AV Transformer detection (audio+video transformer blocks)
+    ltx_score = 0.0
+    ltx_signals = []
+    if has_transformer_blocks and has_audio_blocks:
+        ltx_score = 0.82
+        ltx_signals.append("ltx:transformer_blocks+audio")
+    elif has_transformer_blocks:
+        ltx_score = 0.7
+        ltx_signals.append("ltx:transformer_blocks")
+
+    # Z-Image Turbo (ZIT) detection
+    zit_score = 0.0
+    zit_signals = []
+    if has_cap_embedder and has_context_refiner and has_adaln:
+        zit_score = 0.8
+        zit_signals.append("zit:cap_embedder+context_refiner+adaln")
+        if has_noise_refiner:
+            zit_score = 0.88
+            zit_signals.append("zit:noise_refiner")
+        if has_x_embedder:
+            zit_score = min(0.92, zit_score + 0.04)
+            zit_signals.append("zit:x_embedder")
+
+    # ControlNet detection
+    controlnet_score = 0.0
+    controlnet_signals = []
+    controlnet_base_score = 0.0
+    controlnet_base_signals = []
+    if has_input_hint or has_zero_convs or has_controlnet_prefix or has_controlnet_cond_embedding or has_add_embedding:
+        controlnet_score = 0.88
+        controlnet_signals.append("controlnet:input_hint/zero_convs")
+        if has_controlnet_prefix:
+            controlnet_score = min(0.95, controlnet_score + 0.05)
+            controlnet_signals.append("controlnet:prefix")
+        if has_controlnet_cond_embedding or has_add_embedding:
+            controlnet_score = min(0.95, controlnet_score + 0.04)
+            controlnet_signals.append("controlnet:cond_embedding")
+        if controlnet_base_dim:
+            if controlnet_base_dim == 768:
+                controlnet_base_score = 0.9
+                controlnet_base_signals.append("controlnet-base:sd1(768)")
+            elif controlnet_base_dim == 1024:
+                controlnet_base_score = 0.9
+                controlnet_base_signals.append("controlnet-base:sd2(1024)")
+            elif controlnet_base_dim >= 1280:
+                controlnet_base_score = 0.85
+                controlnet_base_signals.append("controlnet-base:sdxl(>=1280)")
+        elif has_add_embedding or has_controlnet_cond_embedding:
+            controlnet_base_score = max(controlnet_base_score, 0.84)
+            controlnet_base_signals.append("controlnet-base:sdxl(add_embedding)")
+        if has_lora_controlnet:
+            controlnet_signals.append("controlnet:lora")
+
+    # WAN 2.x detection
+    wan_base_score = 0.0
+    wan_base_signals = []
+    if has_wan_blocks and has_wan_attn:
+        wan_base_score = 0.78
+        wan_base_signals.append("wan:blocks+cross_attn")
+
+    wan22_score = 0.0
+    wan22_signals = []
+    wan21_score = 0.0
+    wan21_signals = []
+
+    # Slight boost if metadata explicitly mentions known families
+    meta = header.get("__metadata__")
+    if isinstance(meta, dict):
+        meta_text = " ".join(str(v).lower() for v in meta.values())
+        if "sdxl" in meta_text and sdxl_score > 0:
+            sdxl_score = min(0.97, sdxl_score + 0.05)
+            sdxl_signals.append("meta:sdxl")
+        if "refiner" in meta_text and sdxl_refiner_score > 0:
+            sdxl_refiner_score = min(0.97, sdxl_refiner_score + 0.05)
+            sdxl_refiner_signals.append("meta:refiner")
+        if ("sd15" in meta_text or "sd1.5" in meta_text or "sd 1.5" in meta_text) and sd12_score > 0:
+            sd12_score = min(0.95, sd12_score + 0.05)
+            sd12_signals.append("meta:sd15")
+        if "flux" in meta_text and flux_score > 0:
+            flux_score = min(0.95, flux_score + 0.05)
+            flux_signals.append("meta:flux")
+        if "hunyuan" in meta_text and hunyuan_score > 0:
+            hunyuan_score = min(0.95, hunyuan_score + 0.05)
+            hunyuan_signals.append("meta:hunyuan")
+        if ltx_score > 0:
+            if "ltx-2" in meta_text or "ltx2" in meta_text or "avtransformer3dmodel" in meta_text:
+                ltx_score = min(0.96, ltx_score + 0.08)
+                ltx_signals.append("meta:ltx2")
+            if "causalvideoautoencoder" in meta_text:
+                ltx_score = min(0.96, ltx_score + 0.04)
+                ltx_signals.append("meta:causal_vae")
+        if ("z image turbo" in meta_text or "z-image turbo" in meta_text or "zit" in meta_text) and zit_score > 0:
+            zit_score = min(0.96, zit_score + 0.05)
+            zit_signals.append("meta:zit")
+        if "controlnet" in meta_text and controlnet_score > 0:
+            controlnet_score = min(0.96, controlnet_score + 0.05)
+            controlnet_signals.append("meta:controlnet")
+        if "wan" in meta_text:
+            if (
+                "wan 2.2" in meta_text
+                or "wan2.2" in meta_text
+                or "wan2_2" in meta_text
+                or "wan2-2" in meta_text
+                or "wan22" in meta_text
+                or "wanvideo22" in meta_text
+            ):
+                wan22_score = max(wan22_score, 0.9)
+                wan22_signals.append("meta:wan2.2")
+            if (
+                "wan 2.1" in meta_text
+                or "wan2.1" in meta_text
+                or "wan2_1" in meta_text
+                or "wan2-1" in meta_text
+                or "wan21" in meta_text
+            ):
+                wan21_score = max(wan21_score, 0.88)
+                wan21_signals.append("meta:wan2.1")
+
+    add_tag("sdxl", sdxl_score, sdxl_signals)
+    add_tag("sdxl-refiner", sdxl_refiner_score, sdxl_refiner_signals)
+    # Filename/relpath hints for WAN versions
+    if relpath_text:
+        if "wan22" in relpath_text or "wan2_2" in relpath_text or "wan2.2" in relpath_text or "wan2-2" in relpath_text:
+            wan22_score = max(wan22_score, 0.88)
+            wan22_signals.append("path:wan2.2")
+        if "wan21" in relpath_text or "wan2_1" in relpath_text or "wan2.1" in relpath_text or "wan2-1" in relpath_text:
+            wan21_score = max(wan21_score, 0.85)
+            wan21_signals.append("path:wan2.1")
+        if "z_image_turbo" in relpath_text or "z-image-turbo" in relpath_text or "zimage_turbo" in relpath_text or "zit" in relpath_text:
+            zit_score = max(zit_score, 0.86)
+            zit_signals.append("path:zit")
+        if "controlnet" in relpath_text:
+            controlnet_score = max(controlnet_score, 0.9)
+            controlnet_signals.append("path:controlnet")
+        if "xl" in relpath_text and controlnet_score > 0:
+            controlnet_base_score = max(controlnet_base_score, 0.82)
+            controlnet_base_signals.append("path:xl")
+
+    # Apply WAN base if version is known or leave generic
+    if wan_base_score > 0:
+        if wan22_score > 0:
+            wan22_score = max(wan22_score, wan_base_score)
+            wan22_signals.extend(wan_base_signals)
+        if wan21_score > 0:
+            wan21_score = max(wan21_score, wan_base_score)
+            wan21_signals.extend(wan_base_signals)
+
+    add_tag("sd1/2", sd12_score, sd12_signals)
+    add_tag("flux", flux_score, flux_signals)
+    add_tag("hunyuan3d", hunyuan_score, hunyuan_signals)
+    add_tag("ltx-2", ltx_score, ltx_signals)
+    add_tag("zit", zit_score, zit_signals)
+    add_tag("controlnet", controlnet_score, controlnet_signals)
+    add_tag("controlnet-lora", 0.85 if has_lora_controlnet else 0.0, ["controlnet:lora"])
+    add_tag("controlnet-sd1", controlnet_base_score if controlnet_base_dim == 768 else 0.0, controlnet_base_signals)
+    add_tag("controlnet-sd2", controlnet_base_score if controlnet_base_dim == 1024 else 0.0, controlnet_base_signals)
+    add_tag("controlnet-sdxl", controlnet_base_score if controlnet_base_dim and controlnet_base_dim >= 1280 else 0.0, controlnet_base_signals)
+    add_tag("wan2.2", wan22_score, wan22_signals)
+    add_tag("wan2.1", wan21_score, wan21_signals)
+
+    tags.sort(key=lambda t: t["confidence"], reverse=True)
+    confidence = tags[0]["confidence"] if tags else 0.0
+
+    # Preserve a flat list of signals for quick debugging
+    signals = []
+    for sigs in signals_by_tag.values():
+        signals.extend(sigs)
+
+    return {
+        "tags": tags,
+        "confidence": confidence,
+        "signals": signals,
+        "signals_by_tag": signals_by_tag,
+    }

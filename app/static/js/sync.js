@@ -14,6 +14,9 @@ const Sync = {
     confirmModal: null,
     confirmResolve: null,
     confirmElements: null,
+    safetensorsTags: new Map(),
+    safetensorsPending: new Set(),
+    safetensorsRenderTimer: null,
     minMetricSizeBytes: 5 * 1024 * 1024,
 
     async init() {
@@ -456,12 +459,6 @@ const Sync = {
                 ? `<button class="btn-hash-file" data-action="hash-file" data-relpath="${file.relpath}" title="Compute hash for this file">#️⃣</button>`
                 : '';
 
-            const isSafetensors = this.isSafetensorsFile(file.filename);
-            const safetensorsSide = hasLocal ? 'local' : (hasLake ? 'lake' : 'auto');
-            const safetensorsBtn = isSafetensors
-                ? `<button class="btn-safetensors" data-action="safetensors-header" data-relpath="${file.relpath}" data-side="${safetensorsSide}" title="View safetensors header JSON">ST</button>`
-                : '';
-
             // URL and Bundle buttons
             const sourceUrlBtn = `<button class="btn-source-url ${hasSourceUrl ? 'has-url' : ''}" data-action="source-url" data-hash="${fileHash || ''}" data-relpath="${file.relpath}" data-filename="${file.filename}" title="${hasSourceUrl ? 'Edit source URL' : 'Add source URL'}">🔗</button>`;
             const bundleBtn = `<button class="btn-add-bundle" data-action="add-to-bundle" data-hash="${fileHash || ''}" data-relpath="${file.relpath}" data-filename="${file.filename}" title="Add to bundle">📦</button>`;
@@ -479,11 +476,13 @@ const Sync = {
                     <div class="diff-col diff-col-path">
                         <span class="tree-indent" style="width: ${depth * 20}px"></span>
                         <span class="status-icon ${statusClass}" title="${this.getStatusTooltip(file.status)}">${statusIcon}</span>
-                        <span class="file-name" title="${file.relpath}">${file.filename}</span>
+                        <div class="file-meta">
+                            <span class="file-name" title="${file.relpath}">${file.filename}</span>
+                            ${this.renderSafetensorsTags(file, hasLocal, hasLake)}
+                        </div>
                         <div class="path-actions">
                             ${isProbableSame ? `<button class="btn-verify btn-verify-file" data-action="verify-file" data-relpath="${file.relpath}" title="Verify hash">✓?</button>` : ''}
                             ${hashBtn}
-                            ${safetensorsBtn}
                             ${sourceUrlBtn}
                             ${bundleBtn}
                         </div>
@@ -570,6 +569,85 @@ const Sync = {
 
     isSafetensorsFile(filename) {
         return typeof filename === 'string' && filename.toLowerCase().endsWith('.safetensors');
+    },
+
+    escapeHtml(text) {
+        return String(text).replace(/[&<>"']/g, (match) => {
+            switch (match) {
+                case '&': return '&amp;';
+                case '<': return '&lt;';
+                case '>': return '&gt;';
+                case '"': return '&quot;';
+                case "'": return '&#39;';
+                default: return match;
+            }
+        });
+    },
+
+    renderSafetensorsTags(file, hasLocal, hasLake) {
+        if (!this.isSafetensorsFile(file.filename)) return '';
+
+        const side = hasLocal ? 'local' : (hasLake ? 'lake' : 'auto');
+        const relpath = file.relpath;
+
+        if (!this.safetensorsTags.has(relpath) && !this.safetensorsPending.has(relpath)) {
+            this.fetchSafetensorsTags(relpath, side);
+        }
+
+        const info = this.safetensorsTags.get(relpath);
+        const tags = [];
+
+        const stBtn = `<button class="btn-safetensors" data-action="safetensors-header" data-relpath="${relpath}" data-side="${side}" title="View safetensors header JSON">ST</button>`;
+        tags.push(stBtn);
+
+        const eligibleTags = (info?.tags || []).filter(tag => (tag?.confidence ?? 0) >= 0.6);
+        if (eligibleTags.length) {
+            eligibleTags.forEach((tag, index) => {
+                if (!tag?.name) return;
+                const confidence = typeof tag.confidence === 'number' ? tag.confidence : info.confidence || 0;
+                const label = tag.name.toUpperCase() + (confidence >= 0.85 ? '' : '?');
+                const level = confidence >= 0.85 ? 'high' : 'low';
+                const role = index === 0 ? 'primary' : 'secondary';
+                tags.push(`<span class="file-tag tag-${level} tag-${role}" title="Confidence ${(confidence * 100).toFixed(0)}%">${label}</span>`);
+            });
+        } else if (info?.status === 'error') {
+            tags.push(`<span class="file-tag tag-error" title="${this.escapeHtml(info.error || 'Classification failed')}">?</span>`);
+        } else if (this.safetensorsPending.has(relpath)) {
+            tags.push(`<span class="file-tag tag-pending">...</span>`);
+        }
+
+        return `<span class="file-tags">${tags.join('')}</span>`;
+    },
+
+    scheduleSafetensorsRender() {
+        clearTimeout(this.safetensorsRenderTimer);
+        this.safetensorsRenderTimer = setTimeout(() => {
+            this.render(document.getElementById('search-input')?.value || '');
+        }, 120);
+    },
+
+    async fetchSafetensorsTags(relpath, side) {
+        this.safetensorsPending.add(relpath);
+        this.scheduleSafetensorsRender();
+        try {
+            const res = await App.api(
+                'GET',
+                `/index/safetensors/classify?relpath=${encodeURIComponent(relpath)}&side=${encodeURIComponent(side)}`
+            );
+            this.safetensorsTags.set(relpath, {
+                tags: res.tags || [],
+                confidence: res.confidence || 0,
+                signals: res.signals || [],
+            });
+        } catch (err) {
+            this.safetensorsTags.set(relpath, {
+                status: 'error',
+                error: err.message || 'Classification failed',
+            });
+        } finally {
+            this.safetensorsPending.delete(relpath);
+            this.scheduleSafetensorsRender();
+        }
     },
 
     getFolderStatus(node) {
@@ -1219,6 +1297,7 @@ const Sync = {
                         <div class="safetensors-json">Loading...</div>
                     </div>
                     <div class="modal-footer">
+                        <button class="btn" data-action="safetensors-copy">Copy All</button>
                         <button class="btn" onclick="Sync.closeSafetensorsHeaderModal()">Close</button>
                     </div>
                 </div>
@@ -1228,6 +1307,9 @@ const Sync = {
             modal.addEventListener('click', (e) => {
                 if (e.target === modal) this.closeSafetensorsHeaderModal();
             });
+
+            const copyBtn = modal.querySelector('[data-action="safetensors-copy"]');
+            copyBtn.addEventListener('click', () => this.copySafetensorsHeader());
         }
 
         modal.querySelector('.modal-filename').textContent = `File: ${relpath}`;
@@ -1256,6 +1338,39 @@ const Sync = {
         if (modal) {
             modal.classList.remove('visible');
         }
+    },
+
+    async copySafetensorsHeader() {
+        const modal = document.getElementById('safetensors-header-modal');
+        if (!modal) return;
+        const jsonEl = modal.querySelector('.safetensors-json');
+        if (!jsonEl) return;
+        const text = jsonEl.textContent || '';
+        if (!text.trim()) return;
+
+        try {
+            if (navigator.clipboard && navigator.clipboard.writeText) {
+                await navigator.clipboard.writeText(text);
+                return;
+            }
+        } catch (err) {
+            // Fall back below
+        }
+
+        const textarea = document.createElement('textarea');
+        textarea.value = text;
+        textarea.style.position = 'fixed';
+        textarea.style.top = '-1000px';
+        textarea.style.left = '-1000px';
+        document.body.appendChild(textarea);
+        textarea.focus();
+        textarea.select();
+        try {
+            document.execCommand('copy');
+        } catch (err) {
+            // Ignore copy errors
+        }
+        document.body.removeChild(textarea);
     },
 
     // ==================== Source URL Modal ====================

@@ -8,7 +8,11 @@ from pathlib import Path
 
 from app.services.indexer import IndexerService
 from app.services.differ import compute_diff, DiffEntry
-from app.services.safetensors import read_safetensors_header, SafetensorsHeaderError
+from app.services.safetensors import (
+    read_safetensors_header,
+    SafetensorsHeaderError,
+    classify_safetensors_header,
+)
 from app.config import get_settings
 
 router = APIRouter()
@@ -121,14 +125,7 @@ async def get_stats():
     }
 
 
-@router.get("/safetensors/header")
-async def get_safetensors_header(
-    relpath: str = Query(...),
-    side: Literal["local", "lake", "auto"] = "auto",
-):
-    """
-    Read the JSON header from a .safetensors file.
-    """
+def _resolve_safetensors_path(relpath: str, side: Literal["local", "lake", "auto"]):
     relpath = relpath.strip()
     if not relpath:
         raise HTTPException(status_code=400, detail="relpath is required")
@@ -138,7 +135,7 @@ async def get_safetensors_header(
         raise HTTPException(status_code=400, detail="Not a .safetensors file")
 
     settings = get_settings()
-    roots: list[tuple[str, Path]] = []
+    roots: list[tuple[str, Path]]
     if side == "local":
         roots = [("local", settings.local_models_root)]
     elif side == "lake":
@@ -149,9 +146,8 @@ async def get_safetensors_header(
     chosen_side = None
     file_path = None
     for side_name, root in roots:
-        root_path = root
-        candidate = (root_path / relpath).resolve()
-        if not str(candidate).startswith(str(root_path.resolve())):
+        candidate = (root / relpath).resolve()
+        if not str(candidate).startswith(str(root.resolve())):
             continue
         if candidate.exists() and candidate.is_file():
             chosen_side = side_name
@@ -160,6 +156,19 @@ async def get_safetensors_header(
 
     if not file_path:
         raise HTTPException(status_code=404, detail="File not found")
+
+    return chosen_side, file_path
+
+
+@router.get("/safetensors/header")
+async def get_safetensors_header(
+    relpath: str = Query(...),
+    side: Literal["local", "lake", "auto"] = "auto",
+):
+    """
+    Read the JSON header from a .safetensors file.
+    """
+    chosen_side, file_path = _resolve_safetensors_path(relpath, side)
 
     try:
         header = read_safetensors_header(file_path)
@@ -172,6 +181,31 @@ async def get_safetensors_header(
         "relpath": relpath,
         "side": chosen_side,
         "header": header,
+    }
+
+
+@router.get("/safetensors/classify")
+async def classify_safetensors(
+    relpath: str = Query(...),
+    side: Literal["local", "lake", "auto"] = "auto",
+):
+    """
+    Classify a .safetensors file using header heuristics.
+    """
+    chosen_side, file_path = _resolve_safetensors_path(relpath, side)
+
+    try:
+        header = read_safetensors_header(file_path)
+        result = classify_safetensors_header(header, relpath=relpath)
+    except SafetensorsHeaderError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to classify header: {exc}")
+
+    return {
+        "relpath": relpath,
+        "side": chosen_side,
+        **result,
     }
 
 
