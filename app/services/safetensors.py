@@ -54,6 +54,9 @@ def classify_safetensors_header(header: dict, relpath: str | None = None) -> dic
     def has_prefix(prefix: str) -> bool:
         return any(k.startswith(prefix) for k in keys)
 
+    def has_substring(substr: str) -> bool:
+        return any(substr in k for k in keys)
+
     has_unet = has_prefix("model.diffusion_model.")
     has_vae = has_prefix("first_stage_model.")
     has_cond = has_prefix("conditioner.")
@@ -76,10 +79,13 @@ def classify_safetensors_header(header: dict, relpath: str | None = None) -> dic
     has_transformer_blocks = any(k.startswith("model.diffusion_model.transformer_blocks.") for k in keys)
     has_audio_blocks = any(".audio_" in k or "audio_to_video_attn" in k or "video_to_audio_attn" in k for k in keys)
     has_wan_blocks = any(
-        k.startswith("model.diffusion_model.blocks.") or k.startswith("blocks.")
+        k.startswith("model.diffusion_model.blocks.")
+        or k.startswith("diffusion_model.blocks.")
+        or k.startswith("blocks.")
         for k in keys
     )
     has_wan_attn = any(".cross_attn." in k for k in keys)
+    has_wan_img_attn = any(".k_img." in k or ".v_img." in k or ".q_img." in k for k in keys)
     has_cap_embedder = any(k.startswith("cap_embedder.") for k in keys)
     has_context_refiner = any(k.startswith("context_refiner.") for k in keys)
     has_noise_refiner = any(k.startswith("noise_refiner.") for k in keys)
@@ -95,6 +101,21 @@ def classify_safetensors_header(header: dict, relpath: str | None = None) -> dic
     has_add_embedding = any(k.startswith("add_embedding.") for k in keys)
     has_controlnet_cond_embedding = any(k.startswith("controlnet_cond_embedding.") for k in keys)
     has_lora_controlnet = "lora_controlnet" in header
+    has_lora_keys = any(
+        ".lora_down." in k
+        or ".lora_up." in k
+        or ".lora_A." in k
+        or ".lora_B." in k
+        or k.startswith("lora_")
+        for k in keys
+    )
+    has_lora_te = any(
+        ("text_encoder" in k or "lora_te" in k or "cond_stage_model" in k or "conditioner.embedders" in k)
+        and "lora" in k
+        for k in keys
+    )
+    has_lora_te1 = any("lora_te1" in k for k in keys)
+    has_lora_te2 = any("lora_te2" in k for k in keys)
     has_lllite_prefix = any(k.startswith("lllite_") for k in keys)
     has_t2i_adapter_prefix = any(k.startswith("adapter.body.") for k in keys)
     has_t2i_body_prefix = any(k.startswith("body.") for k in keys)
@@ -411,6 +432,133 @@ def classify_safetensors_header(header: dict, relpath: str | None = None) -> dic
     add_tag("t2i-adapter", t2i_score, t2i_signals)
     add_tag("wan2.2", wan22_score, wan22_signals)
     add_tag("wan2.1", wan21_score, wan21_signals)
+
+    # ------------------------------------------------------------------
+    # LoRA heuristics (common for safetensors LoRA files)
+    # ------------------------------------------------------------------
+    if has_lora_keys:
+        lora_signals = ["lora:keys"]
+        lora_score = 0.9
+
+        # Try to infer base model family from LoRA tensor shapes
+        lora_ctx_dim = None
+        lora_rank = None
+        lora_dtype = None
+        lora_channel_dim = None
+
+        for k in keys:
+            tensor = header.get(k)
+            if not isinstance(tensor, dict):
+                continue
+            dtype = tensor.get("dtype")
+            if dtype and not lora_dtype:
+                lora_dtype = dtype
+
+            shape = tensor.get("shape")
+            if not isinstance(shape, list) or len(shape) < 2:
+                continue
+
+            if (
+                "attn2" in k
+                and ("to_k" in k or ".k." in k)
+                and ("lora_down" in k or "lora_A" in k)
+            ):
+                lora_ctx_dim = shape[1]
+                lora_rank = shape[0]
+            if (
+                "attn1" in k
+                and ("to_k" in k or ".k." in k)
+                and ("lora_down" in k or "lora_A" in k)
+            ):
+                lora_channel_dim = shape[1]
+                lora_rank = lora_rank or shape[0]
+
+        lora_base = None
+        lora_base_score = 0.0
+        lora_base_signals = []
+
+        if lora_ctx_dim == 2048:
+            lora_base = "lora-sdxl"
+            lora_base_score = 0.88
+            lora_base_signals.append("lora:ctx=2048")
+        elif lora_ctx_dim == 1024:
+            lora_base = "lora-sd2"
+            lora_base_score = 0.85
+            lora_base_signals.append("lora:ctx=1024")
+        elif lora_ctx_dim == 768:
+            lora_base = "lora-sd1"
+            lora_base_score = 0.85
+            lora_base_signals.append("lora:ctx=768")
+
+        # WAN-style LoRA (video diffusion) detection
+        if not lora_base and has_wan_blocks and has_wan_attn:
+            # Check for large hidden dim ~5120
+            for k in keys:
+                tensor = header.get(k)
+                if not isinstance(tensor, dict):
+                    continue
+                shape = tensor.get("shape")
+                if isinstance(shape, list) and len(shape) >= 2 and shape[1] >= 4096:
+                    lora_base = "lora-wan"
+                    lora_base_score = 0.9
+                    lora_base_signals.append("lora:wan_hidden>=4096")
+                    if has_wan_img_attn:
+                        lora_base = "lora-wan-i2v"
+                        lora_base_score = 0.92
+                        lora_base_signals.append("lora:wan_img_attn")
+                    break
+
+        # Dual TE LoRA is a strong SDXL signal
+        if not lora_base and has_lora_te1 and has_lora_te2:
+            lora_base = "lora-sdxl"
+            lora_base_score = max(lora_base_score, 0.86)
+            lora_base_signals.append("lora:te1+te2")
+
+        # Metadata hints for LoRA base
+        meta = header.get("__metadata__")
+        if isinstance(meta, dict):
+            meta_text = " ".join(str(v).lower() for v in meta.values())
+            if "sdxl" in meta_text:
+                lora_base = lora_base or "lora-sdxl"
+                lora_base_score = max(lora_base_score, 0.84)
+                lora_base_signals.append("meta:sdxl")
+            if "sd15" in meta_text or "sd1.5" in meta_text or "sd 1.5" in meta_text:
+                lora_base = lora_base or "lora-sd1"
+                lora_base_score = max(lora_base_score, 0.82)
+                lora_base_signals.append("meta:sd1.5")
+            if "sd2" in meta_text or "sd 2" in meta_text:
+                lora_base = lora_base or "lora-sd2"
+                lora_base_score = max(lora_base_score, 0.8)
+                lora_base_signals.append("meta:sd2")
+            if "wan" in meta_text:
+                lora_base = lora_base or "lora-wan"
+                lora_base_score = max(lora_base_score, 0.86)
+                lora_base_signals.append("meta:wan")
+            if "flux" in meta_text:
+                lora_base = "lora-flux"
+                lora_base_score = max(lora_base_score, 0.9)
+                lora_base_signals.append("meta:flux")
+            if "zimage" in meta_text or "z-image" in meta_text or "z image" in meta_text or "zit" in meta_text:
+                lora_base = "lora-zit"
+                lora_base_score = max(lora_base_score, 0.88)
+                lora_base_signals.append("meta:zimage")
+
+        # Add helpful signals to lora tag
+        if lora_rank:
+            lora_signals.append(f"lora:rank={lora_rank}")
+        if lora_channel_dim:
+            lora_signals.append(f"lora:channel_dim={lora_channel_dim}")
+        if lora_ctx_dim:
+            lora_signals.append(f"lora:ctx_dim={lora_ctx_dim}")
+        if lora_dtype:
+            lora_signals.append(f"lora:dtype={lora_dtype}")
+
+        # Append tags
+        add_tag("lora", lora_score, lora_signals)
+        if has_lora_te:
+            add_tag("lora-te", 0.82, ["lora:text_encoder"])
+        if lora_base:
+            add_tag(lora_base, lora_base_score, lora_base_signals)
 
     tags.sort(key=lambda t: t["confidence"], reverse=True)
     confidence = tags[0]["confidence"] if tags else 0.0
