@@ -91,6 +91,11 @@ def classify_safetensors_header(header: dict, relpath: str | None = None) -> dic
     has_add_embedding = any(k.startswith("add_embedding.") for k in keys)
     has_controlnet_cond_embedding = any(k.startswith("controlnet_cond_embedding.") for k in keys)
     has_lora_controlnet = "lora_controlnet" in header
+    has_t2i_adapter_prefix = any(k.startswith("adapter.body.") for k in keys)
+    has_t2i_body_prefix = any(k.startswith("body.") for k in keys)
+    has_t2i_blocks = any(".block1." in k or ".block2." in k for k in keys)
+    has_t2i_resnets = any(".resnets." in k for k in keys)
+    has_t2i_in_conv = any(".in_conv." in k for k in keys)
     controlnet_base_dim = None
     for k in keys:
         if ".attn2.to_k.weight" in k:
@@ -254,6 +259,16 @@ def classify_safetensors_header(header: dict, relpath: str | None = None) -> dic
     wan21_score = 0.0
     wan21_signals = []
 
+    # T2I-Adapter detection
+    t2i_score = 0.0
+    t2i_signals = []
+    if has_t2i_adapter_prefix:
+        t2i_score = 0.78
+        t2i_signals.append("t2i:adapter.body")
+    if has_t2i_body_prefix and has_t2i_blocks and (has_t2i_resnets or has_t2i_in_conv):
+        t2i_score = max(t2i_score, 0.72)
+        t2i_signals.append("t2i:body.blocks")
+
     # Slight boost if metadata explicitly mentions known families
     meta = header.get("__metadata__")
     if isinstance(meta, dict):
@@ -323,6 +338,15 @@ def classify_safetensors_header(header: dict, relpath: str | None = None) -> dic
         if "controlnet" in relpath_text:
             controlnet_score = max(controlnet_score, 0.9)
             controlnet_signals.append("path:controlnet")
+        if "t2i" in relpath_text or "t2i-adapter" in relpath_text or "t2i_adapter" in relpath_text:
+            t2i_score = max(t2i_score, 0.85)
+            t2i_signals.append("path:t2i")
+        if "adapter" in relpath_text and t2i_score > 0:
+            t2i_score = min(0.9, t2i_score + 0.04)
+            t2i_signals.append("path:adapter")
+        if "openpose" in relpath_text and t2i_score > 0:
+            t2i_score = min(0.92, t2i_score + 0.04)
+            t2i_signals.append("path:openpose")
         if "xl" in relpath_text and controlnet_score > 0:
             controlnet_base_score = max(controlnet_base_score, 0.82)
             controlnet_base_signals.append("path:xl")
@@ -346,6 +370,7 @@ def classify_safetensors_header(header: dict, relpath: str | None = None) -> dic
     add_tag("controlnet-sd1", controlnet_base_score if controlnet_base_dim == 768 else 0.0, controlnet_base_signals)
     add_tag("controlnet-sd2", controlnet_base_score if controlnet_base_dim == 1024 else 0.0, controlnet_base_signals)
     add_tag("controlnet-sdxl", controlnet_base_score if controlnet_base_dim and controlnet_base_dim >= 1280 else 0.0, controlnet_base_signals)
+    add_tag("t2i-adapter", t2i_score, t2i_signals)
     add_tag("wan2.2", wan22_score, wan22_signals)
     add_tag("wan2.1", wan21_score, wan21_signals)
 
