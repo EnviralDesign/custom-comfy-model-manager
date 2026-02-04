@@ -53,6 +53,8 @@
             <div class="loading">Loading...</div>
         </div>
     </main>
+    <script src="/static/js/app.js"></script>
+    <script src="/static/js/sync.js"></script>
 
     <!-- Queue Panel -->
     <div class="queue-panel" id="queue-panel">
@@ -61,13 +63,11 @@
             <div class="queue-controls">
                 <button class="btn btn-small" id="pause-queue">⏸️</button>
                 <button class="btn btn-small" id="resume-queue">▶️</button>
+                <button class="btn btn-small btn-danger" id="halt-all-btn" title="Halt All Tasks">🛑</button>
             </div>
         </div>
         <div class="queue-list" id="queue-list"></div>
     </div>
-
-    <script src="/static/js/app.js"></script>
-    <script src="/static/js/sync.js"></script>
 </body>
 
 </html>

@@ -31,7 +31,7 @@ CREATE INDEX IF NOT EXISTS idx_file_index_size ON file_index(size);
 -- Queue: transfer and delete tasks
 CREATE TABLE IF NOT EXISTS queue (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    task_type TEXT NOT NULL CHECK (task_type IN ('copy', 'delete', 'verify', 'dedupe_scan', 'hash_file')),
+    task_type TEXT NOT NULL CHECK (task_type IN ('copy', 'move', 'delete', 'verify', 'dedupe_scan', 'hash_file')),
     status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'running', 'completed', 'failed', 'cancelled')),
     src_side TEXT,  -- 'local' or 'lake', NULL for delete tasks
     src_relpath TEXT,
@@ -157,19 +157,19 @@ async def startup_db() -> None:
     settings = get_settings()
     db_path = settings.get_db_path()
     
-    # Run migration if needed - check if we can insert 'hash_file'
+    # Run migration if needed - check if we can insert 'move'
     async with aiosqlite.connect(db_path) as db:
         # Check if queue table exists
         cursor = await db.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='queue'")
         if await cursor.fetchone():
             try:
-                # Try to insert a dummy hash_file task within a transaction that we roll back
+                # Try to insert a dummy move task within a transaction that we roll back
                 await db.execute("BEGIN TRANSACTION")
-                await db.execute("INSERT INTO queue (task_type, created_at) VALUES ('hash_file', '2000-01-01')")
+                await db.execute("INSERT INTO queue (task_type, created_at) VALUES ('move', '2000-01-01')")
                 await db.execute("ROLLBACK")
             except Exception:
                 # Constraint failed, we need to migrate
-                print("Migrating queue table to support 'hash_file' tasks...")
+                print("Migrating queue table to support 'move' tasks...")
                 await db.execute("ROLLBACK")
                 
                 # Rename old table
@@ -180,7 +180,7 @@ async def startup_db() -> None:
                 await db.execute("""
                 CREATE TABLE IF NOT EXISTS queue (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    task_type TEXT NOT NULL CHECK (task_type IN ('copy', 'delete', 'verify', 'dedupe_scan', 'hash_file')),
+                    task_type TEXT NOT NULL CHECK (task_type IN ('copy', 'move', 'delete', 'verify', 'dedupe_scan', 'hash_file')),
                     status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'running', 'completed', 'failed', 'cancelled')),
                     src_side TEXT,
                     src_relpath TEXT,

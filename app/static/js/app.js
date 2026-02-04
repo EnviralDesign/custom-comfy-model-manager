@@ -64,8 +64,27 @@ const App = {
             });
         }
 
+        const haltBtn = document.getElementById('halt-all-btn');
+        if (haltBtn) {
+            haltBtn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                if (confirm('Are you sure you want to halt ALL tasks?')) {
+                    this.cancelAllTasks();
+                }
+            });
+        }
+
         // Load initial tasks
         this.loadQueueTasks();
+    },
+
+    async cancelAllTasks() {
+        try {
+            await this.api('POST', '/queue/cancel/all');
+            await this.loadQueueTasks();
+        } catch (err) {
+            console.error('Halt all failed:', err);
+        }
     },
 
     async loadQueueTasks() {
@@ -104,9 +123,17 @@ const App = {
                 : 0;
             const isRunning = task.status === 'running';
 
+            const icon = task.task_type === 'copy'
+                ? '📋'
+                : task.task_type === 'move'
+                    ? '📁'
+                    : task.task_type === 'verify'
+                        ? '🔍'
+                        : '🗑️';
+
             return `
             <div class="queue-item queue-item-${task.status}" data-task-id="${task.id}">
-                <span class="queue-icon">${task.task_type === 'copy' ? '📋' : (task.task_type === 'verify' ? '🔍' : '🗑️')}</span>
+                <span class="queue-icon">${icon}</span>
                 <div class="queue-info">
                     <div class="queue-path">${this.truncatePath(task.src_relpath || task.dst_relpath || task.verify_folder)}</div>
                     <div class="queue-meta">

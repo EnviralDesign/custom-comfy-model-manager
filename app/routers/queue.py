@@ -21,6 +21,24 @@ class DeleteRequest(BaseModel):
     relpath: str
 
 
+class MoveRequest(BaseModel):
+    side: Literal["local", "lake"]
+    src_relpath: str
+    dst_relpath: str
+
+
+class MoveBatchRequest(BaseModel):
+    sides: list[Literal["local", "lake"]]
+    src_relpath: str
+    dst_relpath: str
+
+
+class MovePreflightRequest(BaseModel):
+    sides: list[Literal["local", "lake"]]
+    src_relpath: str
+    dst_relpath: str
+
+
 class MirrorPlanRequest(BaseModel):
     src_side: Literal["local", "lake"]
     src_folder: str
@@ -93,6 +111,51 @@ async def enqueue_delete(request: DeleteRequest):
     return {"task_id": task_id, "status": "queued"}
 
 
+@router.post("/move")
+async def enqueue_move(request: MoveRequest):
+    """Enqueue a move task within a side."""
+    queue_service = QueueService()
+    try:
+        task_id = await queue_service.enqueue_move(
+            side=request.side,
+            src_relpath=request.src_relpath,
+            dst_relpath=request.dst_relpath,
+        )
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    return {"task_id": task_id, "status": "queued"}
+
+
+@router.post("/move/batch")
+async def enqueue_move_batch(request: MoveBatchRequest):
+    """Enqueue move tasks across multiple sides after validation."""
+    if not request.sides:
+        raise HTTPException(400, "No sides selected for move")
+    queue_service = QueueService()
+    try:
+        task_ids = await queue_service.enqueue_move_batch(
+            sides=request.sides,
+            src_relpath=request.src_relpath,
+            dst_relpath=request.dst_relpath,
+        )
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    return {"task_ids": task_ids, "status": "queued"}
+
+
+@router.post("/move/preflight")
+async def preflight_move(request: MovePreflightRequest):
+    """Check move eligibility for each side without enqueuing."""
+    if not request.sides:
+        raise HTTPException(400, "No sides selected for move")
+    queue_service = QueueService()
+    return queue_service.preflight_move(
+        sides=request.sides,
+        src_relpath=request.src_relpath,
+        dst_relpath=request.dst_relpath,
+    )
+
+
 @router.post("/pause")
 async def pause_queue():
     """Pause queue processing."""
@@ -107,6 +170,19 @@ async def resume_queue():
     from app.services.worker import QueueWorker
     QueueWorker.resume()
     return {"status": "resumed"}
+
+
+@router.post("/cancel/all")
+async def cancel_all_tasks():
+    """Cancel all pending and running tasks."""
+    queue_service = QueueService()
+    count = await queue_service.cancel_all_tasks()
+    
+    # Also abort any running task in the worker
+    from app.services.worker import QueueWorker
+    QueueWorker.abort_current_task()
+    
+    return {"status": "cancelled", "count": count}
 
 
 @router.post("/cancel/{task_id}")

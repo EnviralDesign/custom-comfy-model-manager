@@ -17,6 +17,8 @@ const Sync = {
     safetensorsTags: new Map(),
     safetensorsPending: new Set(),
     safetensorsRenderTimer: null,
+    dragRelpath: null,
+    moveContext: null,
     minMetricSizeBytes: 5 * 1024 * 1024,
 
     async init() {
@@ -103,6 +105,10 @@ const Sync = {
 
         // Delegate click events on the tree
         document.getElementById('diff-tree')?.addEventListener('click', (e) => this.handleTreeClick(e));
+        document.getElementById('diff-tree')?.addEventListener('dragstart', (e) => this.handleDragStart(e));
+        document.getElementById('diff-tree')?.addEventListener('dragover', (e) => this.handleDragOver(e));
+        document.getElementById('diff-tree')?.addEventListener('dragleave', (e) => this.handleDragLeave(e));
+        document.getElementById('diff-tree')?.addEventListener('drop', (e) => this.handleDrop(e));
 
         // Listen for WebSocket task started events
         document.addEventListener('ws:task_started', async (e) => {
@@ -464,7 +470,7 @@ const Sync = {
             const bundleBtn = `<button class="btn-add-bundle" data-action="add-to-bundle" data-hash="${fileHash || ''}" data-relpath="${file.relpath}" data-filename="${file.filename}" title="Add to bundle">📦</button>`;
 
             html += `
-                <div class="diff-row diff-row-file ${statusClass} ${queueClass}" data-relpath="${file.relpath}" data-depth="${depth}">
+                <div class="diff-row diff-row-file ${statusClass} ${queueClass}" data-relpath="${file.relpath}" data-depth="${depth}" draggable="true">
                     <div class="diff-col diff-col-local">
                         ${this.config.local_allow_delete && hasLocal && !queueInfo ? `<button class="btn-icon btn-delete" data-action="delete-file" data-side="local" data-relpath="${file.relpath}" title="Delete from Local">🗑️</button>` : ''}
                         <span class="file-size">${hasLocal ? App.formatBytes(file.local_size) : ''}</span>
@@ -1083,6 +1089,160 @@ const Sync = {
             this.updateRowQueueStatus();
         } catch (err) {
             alert('Folder delete failed: ' + err.message);
+        }
+    },
+
+    // ==================== Drag + Drop Move ====================
+
+    handleDragStart(e) {
+        const row = e.target.closest?.('.diff-row-file');
+        if (!row) return;
+        const relpath = row.dataset.relpath;
+        if (!relpath) return;
+        this.dragRelpath = relpath;
+        if (e.dataTransfer) {
+            e.dataTransfer.effectAllowed = 'move';
+            e.dataTransfer.setData('text/plain', relpath);
+        }
+    },
+
+    handleDragOver(e) {
+        const folderRow = e.target.closest?.('.diff-row-folder');
+        if (!folderRow) return;
+        e.preventDefault();
+        folderRow.classList.add('drag-over');
+        if (e.dataTransfer) {
+            e.dataTransfer.dropEffect = 'move';
+        }
+    },
+
+    handleDragLeave(e) {
+        const folderRow = e.target.closest?.('.diff-row-folder');
+        if (!folderRow) return;
+        folderRow.classList.remove('drag-over');
+    },
+
+    handleDrop(e) {
+        const folderRow = e.target.closest?.('.diff-row-folder');
+        if (!folderRow) return;
+        e.preventDefault();
+        folderRow.classList.remove('drag-over');
+        const relpath = this.dragRelpath || e.dataTransfer?.getData('text/plain');
+        if (!relpath) return;
+        const folderPath = folderRow.dataset.path || '';
+        this.dragRelpath = null;
+        this.openMoveModal(relpath, folderPath);
+    },
+
+    openMoveModal(relpath, folderPath) {
+        const file = this.diffData.find(entry => entry.relpath === relpath);
+        if (!file) return;
+
+        const filename = relpath.split('/').pop();
+        const destRelpath = folderPath ? `${folderPath}/${filename}` : filename;
+        if (destRelpath === relpath) return;
+
+        let modal = document.getElementById('move-file-modal');
+        if (!modal) {
+            modal = document.createElement('div');
+            modal.id = 'move-file-modal';
+            modal.className = 'modal-overlay';
+            modal.innerHTML = `
+                <div class="modal-content">
+                    <div class="modal-header">
+                        <h3>Move File</h3>
+                        <button class="modal-close" onclick="Sync.closeMoveModal()">×</button>
+                    </div>
+                    <div class="modal-body">
+                        <p class="modal-filename"></p>
+                        <p class="modal-hash move-dest"></p>
+                        <p class="modal-hint">Moves whichever side(s) have this file. This ignores delete policies.</p>
+                    </div>
+                    <div class="modal-footer">
+                        <button class="btn" data-action="move-cancel">Cancel</button>
+                        <button class="btn btn-primary" data-action="move-auto">Move</button>
+                    </div>
+                </div>
+            `;
+            document.body.appendChild(modal);
+
+            modal.addEventListener('click', (event) => {
+                if (event.target === modal) this.closeMoveModal();
+            });
+        }
+
+        this.moveContext = { relpath, destRelpath, hasLocal: file.local_size !== null, hasLake: file.lake_size !== null };
+
+        modal.querySelector('.modal-filename').textContent = `File: ${filename}`;
+        modal.querySelector('.move-dest').textContent = `Destination: ${destRelpath}`;
+
+        const btnMove = modal.querySelector('[data-action="move-auto"]');
+        btnMove.disabled = !(this.moveContext.hasLocal || this.moveContext.hasLake);
+        btnMove.onclick = () => this.executeMoveAuto();
+        modal.querySelector('[data-action="move-cancel"]').onclick = () => this.closeMoveModal();
+
+        modal.classList.add('visible');
+    },
+
+    closeMoveModal() {
+        const modal = document.getElementById('move-file-modal');
+        if (modal) modal.classList.remove('visible');
+        this.moveContext = null;
+    },
+
+    async executeMoveAuto() {
+        const ctx = this.moveContext;
+        if (!ctx) return;
+        this.closeMoveModal();
+
+        const sides = [];
+        if (ctx.hasLocal) sides.push('local');
+        if (ctx.hasLake) sides.push('lake');
+        if (sides.length === 0) {
+            alert('Move skipped: file not found on Local or Lake.');
+            return;
+        }
+
+        try {
+            const preflight = await App.api('POST', '/queue/move/preflight', {
+                sides,
+                src_relpath: ctx.relpath,
+                dst_relpath: ctx.destRelpath,
+            });
+
+            const statuses = preflight?.sides || [];
+            const eligible = statuses.filter(s => s.ok).map(s => s.side);
+            const blocked = statuses.filter(s => !s.ok);
+
+            if (eligible.length === 0) {
+                const msg = blocked.length
+                    ? blocked.map(s => `${s.side}: ${s.message}`).join('\n')
+                    : 'No eligible sides to move.';
+                alert('Move blocked:\n' + msg);
+                return;
+            }
+
+            if (blocked.length > 0) {
+                const msg = blocked.map(s => `${s.side}: ${s.message}`).join('\n');
+                const confirmed = await this.confirmAction({
+                    title: 'Partial Move?',
+                    message: `Some sides cannot be moved:\n${msg}\n\nMove available side(s) only?`,
+                    confirmText: 'Move Available',
+                    confirmClass: 'btn-primary',
+                });
+                if (!confirmed) return;
+            }
+
+            await App.api('POST', '/queue/move/batch', {
+                sides: eligible,
+                src_relpath: ctx.relpath,
+                dst_relpath: ctx.destRelpath,
+            });
+            this.queuedFiles.set(ctx.relpath, { status: 'pending', taskId: null });
+            App.loadQueueTasks();
+            this.updateRowQueueStatus();
+        } catch (err) {
+            alert('Move failed: ' + err.message);
         }
     },
 

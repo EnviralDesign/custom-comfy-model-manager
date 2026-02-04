@@ -403,6 +403,11 @@ a:hover {
     background: var(--bg-tertiary);
 }
 
+.diff-row-folder.drag-over {
+    outline: 1px dashed var(--accent);
+    background: rgba(99, 102, 241, 0.12);
+}
+
 .folder-toggle {
     cursor: pointer;
     width: 16px;
