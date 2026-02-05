@@ -13,6 +13,7 @@ class BundleAsset(BaseModel):
     hash: Optional[str] = None
     source_url_override: Optional[str] = None
     source_url: Optional[str] = None
+    size: Optional[int] = None
 
 
 class Bundle(BaseModel):
@@ -79,10 +80,16 @@ class BundleService:
             # Get assets with potential global source URLs
             cursor = await db.execute("""
                 SELECT ba.relpath, ba.hash, ba.source_url_override,
-                       COALESCE(su_hash.url, su_path.url) as global_source_url
+                       COALESCE(su_hash.url, su_path.url) as global_source_url,
+                       fi.size as size
                 FROM bundle_assets ba
                 LEFT JOIN source_urls su_hash ON su_hash.key = ba.hash AND ba.hash IS NOT NULL
                 LEFT JOIN source_urls su_path ON su_path.key = 'relpath:' || ba.relpath
+                LEFT JOIN (
+                    SELECT relpath, MAX(size) as size
+                    FROM file_index
+                    GROUP BY relpath
+                ) fi ON fi.relpath = ba.relpath
                 WHERE ba.bundle_id = ?
                 ORDER BY ba.relpath
             """, (row["id"],))
@@ -93,7 +100,8 @@ class BundleService:
                     relpath=asset_row["relpath"],
                     hash=asset_row["hash"],
                     source_url_override=asset_row["source_url_override"],
-                    source_url=asset_row["global_source_url"]
+                    source_url=asset_row["global_source_url"],
+                    size=asset_row["size"],
                 ))
             
             bundle.asset_count = len(assets)

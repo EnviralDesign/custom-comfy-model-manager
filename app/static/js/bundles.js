@@ -102,39 +102,71 @@ const Bundles = {
             </div>`;
         }
 
+        const grouped = new Map();
+        for (const asset of assets) {
+            const group = this.getAssetGroup(asset.relpath);
+            if (!grouped.has(group)) grouped.set(group, []);
+            grouped.get(group).push(asset);
+        }
+
+        const rows = [];
+        for (const [group, items] of grouped.entries()) {
+            const totalBytes = items.reduce((sum, item) => sum + (item.size || 0), 0);
+            rows.push(`
+                <tr class="asset-group-row">
+                    <td colspan="4">
+                        <span class="asset-group-badge">${group}</span>
+                        <span class="asset-group-meta">${items.length} item${items.length === 1 ? '' : 's'} • ${totalBytes ? App.formatBytes(totalBytes) : '—'}</span>
+                    </td>
+                </tr>
+            `);
+
+            for (const a of items) {
+                rows.push(`
+                    <tr>
+                        <td title="${a.relpath}">
+                            <div style="font-family: var(--font-mono); font-size: 13px;">${a.relpath}</div>
+                            ${a.hash ? `<div style="font-size: 11px; color: var(--text-muted);">Hash: ${a.hash.slice(0, 12)}...</div>` : ''}
+                        </td>
+                        <td class="asset-size-cell">${a.size ? App.formatBytes(a.size) : '—'}</td>
+                        <td class="asset-url-cell">
+                            ${a.source_url_override || a.source_url ? `
+                                <div style="display: flex; align-items: center; gap: 8px;">
+                                    <span title="Linked">✅</span>
+                                    <button class="btn btn-small" style="font-size: 10px; padding: 2px 6px;" 
+                                            onclick="Bundles.testUrl('${a.source_url_override || a.source_url}', this)">Test</button>
+                                </div>
+                            ` : '<span style="color: var(--text-muted);">-</span>'}
+                        </td>
+                        <td>
+                            <button class="btn-icon btn-danger" onclick="Bundles.removeAsset('${a.relpath}')" title="Remove from bundle">✕</button>
+                        </td>
+                    </tr>
+                `);
+            }
+        }
+
         return `
             <table class="asset-table">
                 <thead>
                     <tr>
                         <th>Path</th>
+                        <th style="width: 110px; text-align: right;">Size</th>
                         <th style="width: 100px;">Override</th>
                         <th style="width: 80px;">Actions</th>
                     </tr>
                 </thead>
                 <tbody>
-                    ${assets.map(a => `
-                        <tr>
-                            <td title="${a.relpath}">
-                                <div style="font-family: var(--font-mono); font-size: 13px;">${a.relpath}</div>
-                                ${a.hash ? `<div style="font-size: 11px; color: var(--text-muted);">Hash: ${a.hash.slice(0, 12)}...</div>` : ''}
-                            </td>
-                            <td class="asset-url-cell">
-                                ${a.source_url_override || a.source_url ? `
-                                    <div style="display: flex; align-items: center; gap: 8px;">
-                                        <span title="Linked">✅</span>
-                                        <button class="btn btn-small" style="font-size: 10px; padding: 2px 6px;" 
-                                                onclick="Bundles.testUrl('${a.source_url_override || a.source_url}', this)">Test</button>
-                                    </div>
-                                ` : '<span style="color: var(--text-muted);">-</span>'}
-                            </td>
-                            <td>
-                                <button class="btn-icon btn-danger" onclick="Bundles.removeAsset('${a.relpath}')" title="Remove from bundle">✕</button>
-                            </td>
-                        </tr>
-                    `).join('')}
+                    ${rows.join('')}
                 </tbody>
             </table>
         `;
+    },
+
+    getAssetGroup(relpath) {
+        if (!relpath) return 'root';
+        const parts = relpath.split('/');
+        return parts[0] || 'root';
     },
 
     async testUrl(url, btn) {

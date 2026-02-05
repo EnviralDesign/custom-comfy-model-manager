@@ -95,6 +95,13 @@
             border-bottom: 1px solid var(--border);
         }
 
+        .asset-table .asset-size-cell {
+            text-align: right;
+            color: var(--text-secondary);
+            font-variant-numeric: tabular-nums;
+            white-space: nowrap;
+        }
+
         .asset-table th {
             color: var(--text-muted);
             font-weight: 500;
@@ -103,6 +110,33 @@
 
         .asset-table tr:hover {
             background: var(--bg-tertiary);
+        }
+
+        .asset-group-row td {
+            background: rgba(148, 163, 184, 0.08);
+            border-bottom: 1px solid var(--border);
+            padding: 10px 12px;
+        }
+
+        .asset-group-row:hover {
+            background: rgba(148, 163, 184, 0.12);
+        }
+
+        .asset-group-badge {
+            display: inline-flex;
+            align-items: center;
+            padding: 4px 8px;
+            border-radius: 999px;
+            background: rgba(148, 163, 184, 0.2);
+            color: var(--text-secondary);
+            font-size: 12px;
+            font-weight: 600;
+            margin-right: 10px;
+        }
+
+        .asset-group-meta {
+            color: var(--text-muted);
+            font-size: 12px;
         }
 
         .asset-table .btn-danger {
