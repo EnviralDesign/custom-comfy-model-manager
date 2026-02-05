@@ -153,12 +153,13 @@ document.addEventListener('DOMContentLoaded', () => {
             }
 
             // 2. Enqueue the download task
-            // Payload format for DOWNLOAD_URLS: { items: [ {relpath, url, hash}, ... ] }
+            // Payload format for DOWNLOAD_URLS: { items: [ {relpath, url, hash, size_bytes}, ... ] }
             await enqueueTask('DOWNLOAD_URLS', {
                 items: data.assets.map(a => ({
                     relpath: a.relpath,
                     url: a.url,
-                    hash: a.hash
+                    hash: a.hash,
+                    size_bytes: a.size
                 }))
             }, `Download ${selected.join(', ')}`);
 

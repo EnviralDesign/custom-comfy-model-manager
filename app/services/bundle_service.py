@@ -3,9 +3,9 @@
 from typing import Optional, List
 from datetime import datetime, timezone
 from pydantic import BaseModel
+from urllib.parse import quote
 
 from app.database import get_db
-from app.config import get_settings
 
 
 class BundleAsset(BaseModel):
@@ -236,9 +236,8 @@ class BundleService:
         Deduplicates by relpath (union of all bundles).
         Returns best URL for each asset.
         """
-        settings = get_settings()
         seen_relpaths = set()
-        resolved = []
+        candidates = []
         
         async with get_db() as db:
             for bundle_name in bundle_names:
@@ -251,38 +250,60 @@ class BundleService:
                         continue
                     seen_relpaths.add(asset.relpath)
                     
-                    # Find best URL for this asset
-                    url = await self._resolve_asset_url(db, asset, server_base_url)
-                    if url:
-                        # Get file size if available
-                        size = None
-                        cursor = await db.execute(
-                            "SELECT size FROM file_index WHERE relpath = ? LIMIT 1",
-                            (asset.relpath,)
-                        )
-                        row = await cursor.fetchone()
-                        if row:
-                            size = row["size"]
-                        
-                        resolved.append(ResolvedAsset(
-                            relpath=asset.relpath,
-                            url=url,
-                            hash=asset.hash,
-                            size=size,
-                        ))
-        
+                    public_url = await self._resolve_public_url(db, asset)
+                    local_url = await self._resolve_local_url(db, asset, server_base_url)
+                    
+                    if not public_url and not local_url:
+                        continue
+                    
+                    candidates.append({
+                        "relpath": asset.relpath,
+                        "hash": asset.hash,
+                        "size": asset.size,
+                        "public_url": public_url,
+                        "local_url": local_url,
+                    })
+
+        # Split items that have both public + local sources
+        both = [c for c in candidates if c["public_url"] and c["local_url"]]
+        local_selected = set()
+        if both:
+            def size_key(item):
+                size = item.get("size")
+                return (size is None, size or 0)
+
+            both_sorted = sorted(both, key=size_key)
+            # Smallest half go to local, largest half go to public
+            local_count = max(1, len(both_sorted) // 2) if len(both_sorted) > 1 else 1
+            local_selected = {c["relpath"] for c in both_sorted[:local_count]}
+
+        resolved = []
+        for c in candidates:
+            url = None
+            if c["public_url"] and c["local_url"]:
+                url = c["local_url"] if c["relpath"] in local_selected else c["public_url"]
+            elif c["public_url"]:
+                url = c["public_url"]
+            elif c["local_url"]:
+                url = c["local_url"]
+            
+            if not url:
+                continue
+            
+            resolved.append(ResolvedAsset(
+                relpath=c["relpath"],
+                url=url,
+                hash=c["hash"],
+                size=c["size"],
+            ))
+
         return resolved
     
-    async def _resolve_asset_url(self, db, asset: BundleAsset, server_base_url: str) -> Optional[str]:
-        """
-        Resolve the best URL for an asset.
-        Priority: source_url_override > source_urls table > local server stream
-        """
-        # 1. Check override on the asset itself
+    async def _resolve_public_url(self, db, asset: BundleAsset) -> Optional[str]:
+        """Resolve a public URL for an asset (override or source_urls)."""
         if asset.source_url_override:
             return asset.source_url_override
         
-        # 2. Check source_urls table (by hash if available, else by relpath)
         if asset.hash:
             cursor = await db.execute(
                 "SELECT url FROM source_urls WHERE key = ?",
@@ -292,7 +313,6 @@ class BundleService:
             if row:
                 return row["url"]
         
-        # Try by relpath
         cursor = await db.execute(
             "SELECT url FROM source_urls WHERE key = ?",
             (f"relpath:{asset.relpath}",)
@@ -301,19 +321,29 @@ class BundleService:
         if row:
             return row["url"]
         
-        # 3. Fall back to local server streaming the file
-        # Check if file exists in index
+        return None
+
+    async def _resolve_local_url(self, db, asset: BundleAsset, server_base_url: str) -> Optional[str]:
+        """Resolve a local or lake stream URL for an asset if indexed."""
+        base_url = server_base_url.rstrip("/")
+
+        # Prefer local if present, else lake
         cursor = await db.execute(
-            "SELECT side FROM file_index WHERE relpath = ? LIMIT 1",
+            "SELECT 1 FROM file_index WHERE relpath = ? AND side = 'local' LIMIT 1",
             (asset.relpath,)
         )
         row = await cursor.fetchone()
         if row:
-            # File exists, serve from local server
-            from urllib.parse import quote
-            return f"{server_base_url}/api/remote/serve/{quote(asset.relpath, safe='')}"
-        
-        # File doesn't exist anywhere
+            return f"{base_url}/api/remote/assets/file?side=local&relpath={quote(asset.relpath, safe='')}"
+
+        cursor = await db.execute(
+            "SELECT 1 FROM file_index WHERE relpath = ? AND side = 'lake' LIMIT 1",
+            (asset.relpath,)
+        )
+        row = await cursor.fetchone()
+        if row:
+            return f"{base_url}/api/remote/assets/file?side=lake&relpath={quote(asset.relpath, safe='')}"
+
         return None
 
 

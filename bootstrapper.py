@@ -25,6 +25,8 @@ import socket
 import platform
 import subprocess
 import hashlib
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -63,6 +65,8 @@ download_session = requests.Session()
 download_session.headers.update({
     "User-Agent": USER_AGENT
 })
+
+_api_lock = threading.Lock()
 
 def log(msg, error=False):
     ts = time.strftime("%H:%M:%S")
@@ -111,7 +115,8 @@ def update_progress(task_id, status, progress=None, message=None, error=None, me
     if meta: payload["meta"] = meta
     
     try:
-        api_session.post(f"{BASE_URL}/api/remote/tasks/progress", json=payload)
+        with _api_lock:
+            api_session.post(f"{BASE_URL}/api/remote/tasks/progress", json=payload)
     except:
         pass
 
@@ -122,6 +127,9 @@ def get_provider_from_url(url: str) -> str:
         host = urlparse(url).netloc.lower()
     except Exception:
         return "unknown"
+    if BASE_HOST and host == BASE_HOST:
+        # Treat any local base host URLs as local provider
+        return "local"
     if host.endswith("huggingface.co") or host.endswith("hf.co"):
         return "huggingface"
     if host.endswith("civitai.com"):
@@ -332,7 +340,7 @@ def handle_install_requirements(task):
     else:
         update_progress(task['id'], "failed", 0.0, "Requirements install failed", error=err)
 
-def download_from_source(url, dest_path, task_id, existing_size=0, extra_headers=None):
+def download_from_source(url, dest_path, task_id, existing_size=0, extra_headers=None, session=None):
     headers = {}
     if extra_headers:
         headers.update(extra_headers)
@@ -342,7 +350,8 @@ def download_from_source(url, dest_path, task_id, existing_size=0, extra_headers
         mode = 'ab'
         
     try:
-        with download_session.get(url, headers=headers, stream=True, timeout=STALL_TIMEOUT) as r:
+        sess = session or download_session
+        with sess.get(url, headers=headers, stream=True, timeout=STALL_TIMEOUT) as r:
             r.raise_for_status()
             
             # Handle potential 416 (Range Not Satisfiable) if file is already complete?
@@ -467,9 +476,22 @@ def handle_download_urls(task):
 
     total_items = len(items)
     items_status = {}
+    normalized_items = []
+
     for i, item in enumerate(items):
-        key = item.get('relpath') or item.get('url') or f"item_{i+1}"
+        relpath = item.get('relpath')
+        url = item.get('url')
+        size_bytes = item.get('size_bytes') or item.get('size')
+        provider = item.get('provider') or (get_provider_from_url(url) if url else "unknown")
+        key = relpath or url or f"item_{i+1}"
         items_status[key] = "pending"
+        normalized_items.append({
+            "key": key,
+            "relpath": relpath,
+            "url": url,
+            "size_bytes": size_bytes,
+            "provider": provider,
+        })
 
     update_progress(
         task['id'],
@@ -478,91 +500,120 @@ def handle_download_urls(task):
         f"Starting batch download of {total_items} items...",
         meta={"items_status": items_status, "items_total": total_items, "items_done": 0}
     )
-    done_count = 0
 
-    for i, item in enumerate(items):
-        relpath = item.get('relpath')
-        url = item.get('url')
-        file_hash = item.get('hash')
-        item_key = relpath or url or f"item_{i+1}"
-        
-        if not relpath or not url:
-            items_status[item_key] = "skipped"
-            done_count += 1
-            update_progress(
-                task['id'],
-                "running",
-                done_count / total_items,
-                f"Skipping {item_key} (missing data)",
-                meta={"items_status": {item_key: "skipped"}, "items_done": done_count}
-            )
-            continue
-            
-        dest_path = MODELS_DIR / relpath
-        dest_path.parent.mkdir(parents=True, exist_ok=True)
-        
-        # Check if exists
-        if dest_path.exists():
-            # Simple size check could be added here
-            log(f"[{i+1}/{total_items}] {relpath} already exists. Skipping.")
-            items_status[item_key] = "skipped"
-            done_count += 1
-            update_progress(
-                task['id'],
-                "running",
-                done_count / total_items,
-                f"Skipping existing: {relpath}",
-                meta={"items_status": {item_key: "skipped"}, "items_done": done_count}
-            )
-            continue
+    lock = threading.Lock()
+    done_count = [0]
 
-        log(f"[{i+1}/{total_items}] Downloading {relpath}...")
-        items_status[item_key] = "downloading"
+    def update_item(key, status, message=None, done_delta=0):
+        with lock:
+            items_status[key] = status
+            done_count[0] += done_delta
+            done = done_count[0]
+        progress = done / total_items if total_items else 1.0
         update_progress(
             task['id'],
             "running",
-            done_count / total_items,
-            f"Downloading {i+1}/{total_items}: {relpath}",
-            meta={"items_status": {item_key: "downloading"}, "items_done": done_count}
+            progress,
+            message,
+            meta={"items_status": {key: status}, "items_done": done}
         )
-        
-        temp_dest = dest_path.with_suffix(dest_path.suffix + ".part")
-        
-        # Resume support logic (simple)
-        current_size = 0
-        if temp_dest.exists():
-            current_size = temp_dest.stat().st_size
 
-        provider = get_provider_from_url(url)
-        if provider == "huggingface" and not HF_API_KEY:
-            log(f"Skipping Hugging Face URL (no HF key provided): {relpath}")
-            continue
-        if provider == "civitai" and not CIVITAI_API_KEY:
-            log(f"Skipping Civitai URL (no Civitai key provided): {relpath}")
-            continue
+    def sort_items(items_list, ascending=True):
+        def size_key(item):
+            size = item.get("size_bytes")
+            if size is None:
+                return (1, 0)  # Unknown sizes go last
+            return (0, size if ascending else -size)
+        return sorted(items_list, key=size_key)
 
-        headers = auth_headers_for_source(provider, url)
-        ok, err = download_from_source(url, temp_dest, task['id'], current_size, extra_headers=headers)
-        
-        if ok:
-            temp_dest.rename(dest_path)
-            log(f"Successfully downloaded {relpath}")
-            items_status[item_key] = "completed"
-        else:
-            log(f"Failed to download {relpath}: {err}", error=True)
-            # We continue with other items even if one fails
-            items_status[item_key] = "failed"
+    queues = {
+        "local": [],
+        "huggingface": [],
+        "civitai": [],
+        "other": [],
+    }
 
-        done_count += 1
-        update_progress(
-            task['id'],
-            "running",
-            done_count / total_items,
-            f"Processed {i+1}/{total_items}: {relpath}",
-            meta={"items_status": {item_key: items_status[item_key]}, "items_done": done_count}
-        )
-    
-    update_progress(task['id'], "completed", 1.0, f"Batch download finished. Processed {total_items} items.")
+    for item in normalized_items:
+        provider = item["provider"]
+        if provider not in queues:
+            provider = "other"
+        queues[provider].append(item)
+
+    queues["local"] = sort_items(queues["local"], ascending=True)
+    queues["huggingface"] = sort_items(queues["huggingface"], ascending=False)
+    queues["civitai"] = sort_items(queues["civitai"], ascending=False)
+    queues["other"] = sort_items(queues["other"], ascending=False)
+
+    def worker(provider, queue_items):
+        session = requests.Session()
+        session.headers.update({"User-Agent": USER_AGENT})
+
+        for item in queue_items:
+            relpath = item.get('relpath')
+            url = item.get('url')
+            item_key = item.get('key')
+
+            if not relpath or not url:
+                update_item(item_key, "skipped", f"Skipping {item_key} (missing data)", done_delta=1)
+                continue
+
+            if provider == "huggingface" and not HF_API_KEY:
+                log(f"Skipping Hugging Face URL (no HF key provided): {relpath}")
+                update_item(item_key, "skipped", f"Skipped HF (no key): {relpath}", done_delta=1)
+                continue
+            if provider == "civitai" and not CIVITAI_API_KEY:
+                log(f"Skipping Civitai URL (no Civitai key provided): {relpath}")
+                update_item(item_key, "skipped", f"Skipped Civitai (no key): {relpath}", done_delta=1)
+                continue
+
+            dest_path = MODELS_DIR / relpath
+            dest_path.parent.mkdir(parents=True, exist_ok=True)
+
+            if dest_path.exists():
+                log(f"{relpath} already exists. Skipping.")
+                update_item(item_key, "skipped", f"Skipping existing: {relpath}", done_delta=1)
+                continue
+
+            update_item(item_key, "downloading", f"Downloading: {relpath}")
+
+            temp_dest = dest_path.with_suffix(dest_path.suffix + ".part")
+            current_size = temp_dest.stat().st_size if temp_dest.exists() else 0
+
+            headers = auth_headers_for_source(provider, url)
+            ok, err = download_from_source(
+                url,
+                temp_dest,
+                task['id'],
+                current_size,
+                extra_headers=headers,
+                session=session
+            )
+
+            if ok:
+                temp_dest.rename(dest_path)
+                log(f"Successfully downloaded {relpath}")
+                update_item(item_key, "completed", f"Completed: {relpath}", done_delta=1)
+            else:
+                log(f"Failed to download {relpath}: {err}", error=True)
+                update_item(item_key, "failed", f"Failed: {relpath}", done_delta=1)
+
+    active_queues = [(provider, items) for provider, items in queues.items() if items]
+    if active_queues:
+        with ThreadPoolExecutor(max_workers=len(active_queues)) as executor:
+            futures = [executor.submit(worker, provider, items) for provider, items in active_queues]
+            for f in futures:
+                f.result()
+
+    failed = sum(1 for s in items_status.values() if s == "failed")
+    skipped = sum(1 for s in items_status.values() if s == "skipped")
+    completed = sum(1 for s in items_status.values() if s == "completed")
+    msg = f"Batch download finished. Completed {completed}/{total_items}"
+    if skipped:
+        msg += f", skipped {skipped}"
+    if failed:
+        msg += f", failed {failed}"
+
+    update_progress(task['id'], "completed", 1.0, msg)
 
 # --- MAIN LOOP ---
 
