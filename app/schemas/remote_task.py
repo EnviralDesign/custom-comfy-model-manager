@@ -13,6 +13,7 @@ TaskType = Literal[
     "DOWNLOAD_URLS",
     "PIP_INSTALL_TORCH",
     "PIP_INSTALL_REQUIREMENTS",
+    "INSTALL_COMFYUI_MANAGER",
 ]
 
 class RemoteTaskBase(BaseModel):

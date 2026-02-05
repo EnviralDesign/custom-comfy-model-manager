@@ -22,7 +22,9 @@ document.addEventListener('DOMContentLoaded', () => {
         btnCreateVenv: document.getElementById('btn-create-venv'),
         btnInstallTorch: document.getElementById('btn-install-torch'),
         btnInstallRequirements: document.getElementById('btn-install-requirements'),
-        taskList: document.getElementById('remote-task-list'),
+        btnInstallManager: document.getElementById('btn-install-manager'),
+        stepList: document.getElementById('remote-step-list'),
+        stepDownloadItems: document.getElementById('step-download-items'),
         bundleList: document.getElementById('bundle-provision-list'),
         btnProvision: document.getElementById('btn-provision-bundles'),
         torchIndexDisplay: document.getElementById('torch-index-display')
@@ -35,6 +37,22 @@ document.addEventListener('DOMContentLoaded', () => {
         torch_index_flag: '',
         torch_packages: []
     };
+    const stepTypes = [
+        'COMFY_GIT_CLONE',
+        'CREATE_VENV',
+        'PIP_INSTALL_TORCH',
+        'PIP_INSTALL_REQUIREMENTS',
+        'INSTALL_COMFYUI_MANAGER',
+        'DOWNLOAD_URLS'
+    ];
+    const stepEls = {};
+    stepTypes.forEach(type => {
+        stepEls[type] = {
+            status: document.getElementById(`step-status-${type}`),
+            detail: document.getElementById(`step-detail-${type}`),
+            error: document.getElementById(`step-error-${type}`)
+        };
+    });
 
     // --- Actions ---
 
@@ -66,8 +84,7 @@ document.addEventListener('DOMContentLoaded', () => {
             const res = await fetch('/api/remote/session/end', { method: 'POST' });
             if (res.ok) {
                 fetchStatus();
-                // Clear tasks view
-                els.taskList.innerHTML = '<div class="text-secondary text-sm">Session ended.</div>';
+                resetStepStatuses();
             }
         } catch (e) {
             alert('Failed to end session');
@@ -159,7 +176,8 @@ document.addEventListener('DOMContentLoaded', () => {
                     relpath: a.relpath,
                     url: a.url,
                     hash: a.hash,
-                    size_bytes: a.size
+                    size_bytes: a.size,
+                    provider: providerFromUrl(a.url)
                 }))
             }, `Download ${selected.join(', ')}`);
 
@@ -201,6 +219,7 @@ document.addEventListener('DOMContentLoaded', () => {
             els.activeUi.style.display = 'none';
             els.inactiveUi.style.display = 'block';
             expiryTime = null;
+            resetStepStatuses();
         }
 
         // Agent State
@@ -229,35 +248,74 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     function renderTasks(tasks) {
-        if (tasks.length === 0) {
-            els.taskList.innerHTML = '<div class="text-secondary text-sm">No tasks queued.</div>';
+        renderStepStatuses(tasks);
+    }
+
+    function resetStepStatuses() {
+        stepTypes.forEach(type => {
+            const elsForStep = stepEls[type];
+            if (elsForStep.status) {
+                elsForStep.status.textContent = 'Not started';
+                elsForStep.status.className = 'step-status-pill';
+            }
+            if (elsForStep.detail) {
+                elsForStep.detail.textContent = '';
+            }
+            if (elsForStep.error) {
+                elsForStep.error.textContent = '';
+            }
+        });
+        if (els.stepDownloadItems) {
+            els.stepDownloadItems.innerHTML = '';
+        }
+    }
+
+    function renderStepStatuses(tasks) {
+        if (!tasks || tasks.length === 0) {
+            resetStepStatuses();
             return;
         }
 
-        els.taskList.innerHTML = tasks.slice().reverse().map(t => {
-            let statusClass = 'text-secondary';
-            if (t.status === 'running') statusClass = 'text-primary';
-            if (t.status === 'completed') statusClass = 'text-success';
-            if (t.status === 'failed') statusClass = 'text-danger';
+        const latestByType = {};
+        tasks.forEach(t => {
+            const existing = latestByType[t.type];
+            if (!existing) {
+                latestByType[t.type] = t;
+                return;
+            }
+            const existingTime = new Date(existing.created_at || 0).getTime();
+            const newTime = new Date(t.created_at || 0).getTime();
+            if (newTime >= existingTime) {
+                latestByType[t.type] = t;
+            }
+        });
 
-            const progress = t.progress ? `(${Math.round(t.progress * 100)}%)` : '';
+        stepTypes.forEach(type => {
+            const t = latestByType[type];
+            const elsForStep = stepEls[type];
+            if (!elsForStep.status || !elsForStep.detail || !elsForStep.error) return;
 
-            const downloadItemsHtml = t.type === 'DOWNLOAD_URLS' ? renderDownloadItems(t) : '';
+            if (!t) {
+                elsForStep.status.textContent = 'Not started';
+                elsForStep.status.className = 'step-status-pill';
+                elsForStep.detail.textContent = '';
+                elsForStep.error.textContent = '';
+                if (type === 'DOWNLOAD_URLS' && els.stepDownloadItems) {
+                    els.stepDownloadItems.innerHTML = '';
+                }
+                return;
+            }
 
-            return `
-            <div class="queue-item" style="padding: 8px; border-bottom: 1px solid var(--border-dim);">
-                <div style="display:flex; justify-content:space-between; margin-bottom: 4px;">
-                    <span style="font-weight:500;">${t.label || t.type}</span>
-                    <span class="${statusClass} text-sm" style="text-transform:uppercase; font-size:0.75rem; font-weight:600;">
-                        ${t.status} ${progress}
-                    </span>
-                </div>
-                <div class="text-xs text-secondary" style="white-space: pre-wrap;">${t.message || ''}</div>
-                ${t.error ? `<div class="text-xs text-danger mt-1">${t.error}</div>` : ''}
-                ${downloadItemsHtml}
-            </div>
-            `;
-        }).join('');
+            const progress = t.progress ? ` (${Math.round(t.progress * 100)}%)` : '';
+            elsForStep.status.textContent = `${t.status}${progress}`;
+            elsForStep.status.className = `step-status-pill ${t.status}`;
+            elsForStep.detail.textContent = t.message || '';
+            elsForStep.error.textContent = t.error || '';
+
+            if (type === 'DOWNLOAD_URLS' && els.stepDownloadItems) {
+                els.stepDownloadItems.innerHTML = renderDownloadItems(t);
+            }
+        });
     }
 
     function renderDownloadItems(task) {
@@ -266,12 +324,17 @@ document.addEventListener('DOMContentLoaded', () => {
 
         const statusMap = (task.meta && task.meta.items_status) || {};
         let doneCount = 0;
+        const activeCounts = {};
 
         const rows = items.map(item => {
             const relpath = item.relpath || item.url || 'unknown';
             const status = statusMap[relpath] || 'pending';
+            const provider = (item.provider || providerFromUrl(item.url) || 'web').toLowerCase();
             if (status === 'completed' || status === 'failed' || status === 'skipped') {
                 doneCount += 1;
+            }
+            if (status === 'downloading') {
+                activeCounts[provider] = (activeCounts[provider] || 0) + 1;
             }
 
             let statusClass = 'text-secondary';
@@ -280,21 +343,69 @@ document.addEventListener('DOMContentLoaded', () => {
             if (status === 'skipped') statusClass = 'text-warning';
             if (status === 'failed') statusClass = 'text-danger';
 
+            const providerLabel = providerLabelFor(provider);
+
             return `
             <div class="download-item">
                 <div class="download-item-path" title="${relpath}">${relpath}</div>
-                <div class="download-item-status ${statusClass}">${status}</div>
+                <div style="display:flex; align-items:center; gap:6px;">
+                    <span class="source-badge ${providerClassFor(provider)}">${providerLabel}</span>
+                    <span class="download-item-status ${statusClass}">${status}</span>
+                </div>
             </div>
             `;
         }).join('');
 
         const total = items.length;
         const done = (task.meta && Number.isFinite(task.meta.items_done)) ? task.meta.items_done : doneCount;
+        const activeLine = renderActiveSources(activeCounts);
 
         return `
             <div class="text-xs text-secondary" style="margin-top:6px;">Items: ${done}/${total} done</div>
+            ${activeLine}
             <div class="download-items">
                 ${rows}
+            </div>
+        `;
+    }
+
+    function providerFromUrl(url) {
+        if (!url) return 'web';
+        try {
+            const u = new URL(url);
+            const host = u.host.toLowerCase();
+            if (host === window.location.host.toLowerCase()) return 'local';
+            if (host.endsWith('huggingface.co') || host.endsWith('hf.co')) return 'huggingface';
+            if (host.endsWith('civitai.com')) return 'civitai';
+            return 'web';
+        } catch (e) {
+            return 'web';
+        }
+    }
+
+    function providerLabelFor(provider) {
+        if (provider === 'local') return 'LOCAL';
+        if (provider === 'huggingface') return 'HUGGINGFACE';
+        if (provider === 'civitai') return 'CIVITAI';
+        return 'WEB';
+    }
+
+    function providerClassFor(provider) {
+        if (provider === 'local') return 'local';
+        if (provider === 'huggingface') return 'huggingface';
+        if (provider === 'civitai') return 'civitai';
+        return 'web';
+    }
+
+    function renderActiveSources(activeCounts) {
+        const entries = Object.entries(activeCounts);
+        if (entries.length === 0) return '';
+        const parts = entries.map(([provider, count]) => {
+            return `<span class="source-badge ${providerClassFor(provider)}">${providerLabelFor(provider)} ${count}</span>`;
+        }).join(' ');
+        return `
+            <div class="text-xs text-secondary" style="margin-top:6px; display:flex; gap:6px; flex-wrap: wrap;">
+                <span>Active downloads:</span> ${parts}
             </div>
         `;
     }
@@ -365,6 +476,12 @@ document.addEventListener('DOMContentLoaded', () => {
     if (els.btnInstallRequirements) {
         els.btnInstallRequirements.addEventListener('click', () => {
             enqueueTask('PIP_INSTALL_REQUIREMENTS', {}, 'Install ComfyUI Requirements');
+        });
+    }
+
+    if (els.btnInstallManager) {
+        els.btnInstallManager.addEventListener('click', () => {
+            enqueueTask('INSTALL_COMFYUI_MANAGER', {}, 'Install ComfyUI Manager');
         });
     }
 

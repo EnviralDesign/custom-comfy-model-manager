@@ -38,7 +38,6 @@ CIVITAI_API_KEY = os.environ.get("CIVITAI_API_KEY", "").strip()
 TORCH_INDEX_URL = os.environ.get("TORCH_INDEX_URL", "").strip()
 TORCH_INDEX_FLAG = os.environ.get("TORCH_INDEX_FLAG", "--extra-index-url").strip()
 TORCH_PACKAGES = os.environ.get("TORCH_PACKAGES", "torch torchvision torchaudio").split()
-remote_root_dir = "~/comfy_remote"  # Where to install things
 BASE_HOST = urlparse(BASE_URL).netloc.lower()
 
 # --- CONSTANTS ---
@@ -47,10 +46,9 @@ CHUNK_SIZE = 1024 * 1024  # 1MB chunks
 STALL_TIMEOUT = 45
 
 # --- SETUP ---
-REMOTE_ROOT = Path(os.path.expanduser(remote_root_dir)).resolve()
-COMFY_DIR = REMOTE_ROOT / "ComfyUI"
-# We will download directly into ComfyUI/models once cloned
-MODELS_DIR = COMFY_DIR / "models" 
+COMFY_DIR = None
+MODELS_DIR = None
+COMFY_DIR_ENV = os.environ.get("COMFY_DIR", "").strip()
 
 # --- IMPORTS ---
 import requests
@@ -73,9 +71,27 @@ def log(msg, error=False):
     prefix = "❌" if error else "ℹ️"
     print(f"[{ts}] {prefix} {msg}")
 
-def ensure_dirs():
-    # Only ensure root exists; ComfyUI dir is created by git clone
-    REMOTE_ROOT.mkdir(parents=True, exist_ok=True)
+def set_comfy_dir(path: str):
+    global COMFY_DIR, MODELS_DIR
+    COMFY_DIR = Path(os.path.expanduser(path)).resolve()
+    MODELS_DIR = COMFY_DIR / "models"
+
+def ensure_comfy_dir(task_id=None) -> bool:
+    if COMFY_DIR is None:
+        msg = "ComfyUI path not set. Restart agent and provide a path."
+        if task_id:
+            update_progress(task_id, "failed", 0.0, msg)
+        else:
+            log(msg, error=True)
+        return False
+    if not COMFY_DIR.exists():
+        msg = f"ComfyUI path not found: {COMFY_DIR}"
+        if task_id:
+            update_progress(task_id, "failed", 0.0, msg)
+        else:
+            log(msg, error=True)
+        return False
+    return True
 
 # --- API WRAPPERS ---
 
@@ -87,7 +103,8 @@ def register_agent():
             "os": f"{platform.system()} {platform.release()}",
             "details": {
                 "python": platform.python_version(),
-                "cwd": str(os.getcwd())
+                "cwd": str(os.getcwd()),
+                "comfy_dir": str(COMFY_DIR) if COMFY_DIR else None
             }
         }
         resp = api_session.post(f"{BASE_URL}/api/remote/agent/register", json=payload)
@@ -204,7 +221,10 @@ def ensure_pip(task_id) -> tuple[bool, str]:
 def handle_git_clone(task):
     payload = task.get('payload', {})
     repo_url = payload.get('repo_url', "https://github.com/comfyanonymous/ComfyUI.git")
-    dest = payload.get('dest_path', str(COMFY_DIR))
+    dest = payload.get('dest_path', str(COMFY_DIR) if COMFY_DIR else "")
+    if not dest:
+        update_progress(task['id'], "failed", 0.0, "ComfyUI path not set. Restart agent and provide a path.")
+        return
     dest_path = Path(dest)
 
     update_progress(task['id'], "running", 0.0, f"Cloning {repo_url}...")
@@ -216,6 +236,7 @@ def handle_git_clone(task):
 
     try:
         log(f"Cloning to {dest_path}...")
+        dest_path.parent.mkdir(parents=True, exist_ok=True)
         # Simple subprocess call
         cmd = ["git", "clone", repo_url, str(dest_path)]
         process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
@@ -237,8 +258,7 @@ def handle_create_venv(task):
     update_progress(task['id'], "running", 0.0, "Creating venv with uv (Python 3.13)...")
     
     # We run this INSIDE the ComfyUI directory
-    if not COMFY_DIR.exists():
-        update_progress(task['id'], "failed", 0.0, "ComfyUI directory not found. Install first.")
+    if not ensure_comfy_dir(task['id']):
         return
 
     try:
@@ -285,8 +305,7 @@ def handle_install_torch(task):
     index_url = payload.get('index_url') or TORCH_INDEX_URL
     index_flag = payload.get('index_flag') or TORCH_INDEX_FLAG or "--extra-index-url"
 
-    if not COMFY_DIR.exists():
-        update_progress(task['id'], "failed", 0.0, "ComfyUI directory not found. Install first.")
+    if not ensure_comfy_dir(task['id']):
         return
 
     venv_python = get_venv_python()
@@ -318,8 +337,7 @@ def handle_install_torch(task):
         update_progress(task['id'], "failed", 0.0, "PyTorch install failed", error=err)
 
 def handle_install_requirements(task):
-    if not COMFY_DIR.exists():
-        update_progress(task['id'], "failed", 0.0, "ComfyUI directory not found. Install first.")
+    if not ensure_comfy_dir(task['id']):
         return
 
     venv_python = get_venv_python()
@@ -339,6 +357,28 @@ def handle_install_requirements(task):
         update_progress(task['id'], "completed", 1.0, "Requirements installed")
     else:
         update_progress(task['id'], "failed", 0.0, "Requirements install failed", error=err)
+
+def handle_install_manager(task):
+    if not ensure_comfy_dir(task['id']):
+        return
+
+    custom_nodes = COMFY_DIR / "custom_nodes"
+    custom_nodes.mkdir(parents=True, exist_ok=True)
+    dest = custom_nodes / "comfyui-manager"
+
+    if dest.exists() and (dest / ".git").exists():
+        update_progress(task['id'], "completed", 1.0, "ComfyUI-Manager already installed")
+        return
+
+    update_progress(task['id'], "running", 0.0, "Cloning ComfyUI-Manager...")
+    rc, _, err = run_cmd(
+        ["git", "clone", "https://github.com/ltdrdata/ComfyUI-Manager", str(dest)],
+        cwd=custom_nodes
+    )
+    if rc == 0:
+        update_progress(task['id'], "completed", 1.0, "ComfyUI-Manager installed. Restart ComfyUI to load it.")
+    else:
+        update_progress(task['id'], "failed", 0.0, "ComfyUI-Manager install failed", error=err)
 
 def download_from_source(url, dest_path, task_id, existing_size=0, extra_headers=None, session=None):
     headers = {}
@@ -388,6 +428,9 @@ def handle_download(task):
     file_hash = payload.get('hash')
     relpath = payload.get('relpath')
     
+    if not ensure_comfy_dir(task['id']):
+        return
+
     update_progress(task['id'], "running", 0.0, "Resolving sources...")
     
     # 1. Resolve sources via App
@@ -472,6 +515,9 @@ def handle_download_urls(task):
     
     if not items:
         update_progress(task['id'], "completed", 1.0, "No items to download")
+        return
+
+    if not ensure_comfy_dir(task['id']):
         return
 
     total_items = len(items)
@@ -654,7 +700,31 @@ def main():
         except KeyboardInterrupt:
             return
 
-    ensure_dirs()
+    # Configure ComfyUI directory
+    comfy_path = COMFY_DIR_ENV
+    if not comfy_path:
+        try:
+            comfy_path = input("Enter ComfyUI path (existing or to create): ").strip()
+        except KeyboardInterrupt:
+            return
+
+    if not comfy_path:
+        print("No ComfyUI path provided. Exiting.")
+        return
+
+    expanded = Path(os.path.expanduser(comfy_path)).resolve()
+    if not expanded.exists():
+        try:
+            resp = input(f"Path does not exist. Create it? [y/N]: ").strip().lower()
+        except KeyboardInterrupt:
+            return
+        if resp != "y":
+            print("ComfyUI path not created. Exiting.")
+            return
+        expanded.mkdir(parents=True, exist_ok=True)
+
+    set_comfy_dir(str(expanded))
+
     register_agent()
     
     log("Waiting for tasks (Ctrl+C to stop)...")
@@ -681,6 +751,8 @@ def main():
                     handle_install_torch(task)
                 elif task['type'] == 'PIP_INSTALL_REQUIREMENTS':
                     handle_install_requirements(task)
+                elif task['type'] == 'INSTALL_COMFYUI_MANAGER':
+                    handle_install_manager(task)
                 else:
                     log(f"Unknown task type: {task['type']}")
                     update_progress(task['id'], "failed", error="Unknown task type")

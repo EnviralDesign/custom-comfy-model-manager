@@ -102,7 +102,7 @@
             display: flex;
             justify-content: space-between;
             padding: 1rem 0;
-            border-bottom: 1px solid var(--border-dim);
+            border-bottom: 1px solid var(--border);
         }
 
         .config-label {
@@ -172,6 +172,109 @@
             letter-spacing: 0.06em;
             font-weight: 600;
             flex-shrink: 0;
+        }
+
+        .step-list {
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+        }
+
+        .step-row {
+            border: 1px solid var(--border);
+            border-radius: var(--radius-md);
+            padding: 12px;
+            background: var(--bg-tertiary);
+        }
+
+        .step-row-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            gap: 12px;
+        }
+
+        .step-title {
+            font-weight: 600;
+            font-size: 0.95rem;
+        }
+
+        .step-status-pill {
+            font-size: 0.7rem;
+            text-transform: uppercase;
+            letter-spacing: 0.08em;
+            padding: 4px 8px;
+            border-radius: 999px;
+            border: 1px solid var(--border);
+            color: var(--text-secondary);
+            background: rgba(148, 163, 184, 0.12);
+            white-space: nowrap;
+        }
+
+        .step-status-pill.running {
+            color: #a5b4fc;
+            border-color: rgba(99, 102, 241, 0.4);
+            background: rgba(99, 102, 241, 0.1);
+        }
+
+        .step-status-pill.completed {
+            color: #34d399;
+            border-color: rgba(34, 197, 94, 0.4);
+            background: rgba(34, 197, 94, 0.1);
+        }
+
+        .step-status-pill.failed {
+            color: #f87171;
+            border-color: rgba(239, 68, 68, 0.4);
+            background: rgba(239, 68, 68, 0.1);
+        }
+
+        .step-detail {
+            margin-top: 6px;
+            font-size: 12px;
+            color: var(--text-secondary);
+            white-space: pre-wrap;
+        }
+
+        .step-error {
+            margin-top: 6px;
+            font-size: 12px;
+            color: var(--danger);
+            white-space: pre-wrap;
+        }
+
+        .source-badge {
+            font-size: 10px;
+            text-transform: uppercase;
+            letter-spacing: 0.08em;
+            padding: 2px 6px;
+            border-radius: 999px;
+            border: 1px solid var(--border);
+            color: var(--text-secondary);
+        }
+
+        .source-badge.local {
+            color: #22d3ee;
+            border-color: rgba(34, 211, 238, 0.5);
+            background: rgba(34, 211, 238, 0.1);
+        }
+
+        .source-badge.huggingface {
+            color: #fbbf24;
+            border-color: rgba(245, 158, 11, 0.5);
+            background: rgba(245, 158, 11, 0.1);
+        }
+
+        .source-badge.civitai {
+            color: #f472b6;
+            border-color: rgba(244, 114, 182, 0.5);
+            background: rgba(244, 114, 182, 0.1);
+        }
+
+        .source-badge.web {
+            color: var(--text-secondary);
+            border-color: rgba(148, 163, 184, 0.4);
+            background: rgba(148, 163, 184, 0.1);
         }
     </style>
 </head>
@@ -301,6 +404,10 @@
                         style="text-align: left; margin-bottom: 1rem; padding: 1rem;">
                         4) 📦 Install ComfyUI Requirements
                     </button>
+                    <button id="btn-install-manager" class="btn btn-secondary w-full"
+                        style="text-align: left; margin-bottom: 1rem; padding: 1rem;">
+                        5) 🧩 Install ComfyUI Manager (Custom Nodes)
+                    </button>
 
                     <h4 class="mb-4 mt-6">Provisioning</h4>
                     <div id="bundle-provision-list"
@@ -314,9 +421,62 @@
 
                 <!-- Task List -->
                 <div class="task-list-container">
-                    <h4 class="mb-4">Task Queue</h4>
-                    <div id="remote-task-list" class="queue-list" style="max-height: 300px; overflow-y: auto;">
-                        <div class="text-secondary text-sm">No tasks queued.</div>
+                    <h4 class="mb-4">Step Status</h4>
+                    <div id="remote-step-list" class="step-list">
+                        <div class="step-row" data-step="COMFY_GIT_CLONE">
+                            <div class="step-row-header">
+                                <div class="step-title">1) Clone ComfyUI Repo</div>
+                                <div class="step-status-pill" id="step-status-COMFY_GIT_CLONE">Not started</div>
+                            </div>
+                            <div class="step-detail" id="step-detail-COMFY_GIT_CLONE"></div>
+                            <div class="step-error" id="step-error-COMFY_GIT_CLONE"></div>
+                        </div>
+
+                        <div class="step-row" data-step="CREATE_VENV">
+                            <div class="step-row-header">
+                                <div class="step-title">2) Create Venv (Python 3.13)</div>
+                                <div class="step-status-pill" id="step-status-CREATE_VENV">Not started</div>
+                            </div>
+                            <div class="step-detail" id="step-detail-CREATE_VENV"></div>
+                            <div class="step-error" id="step-error-CREATE_VENV"></div>
+                        </div>
+
+                        <div class="step-row" data-step="PIP_INSTALL_TORCH">
+                            <div class="step-row-header">
+                                <div class="step-title">3) Install PyTorch (with index URL)</div>
+                                <div class="step-status-pill" id="step-status-PIP_INSTALL_TORCH">Not started</div>
+                            </div>
+                            <div class="step-detail" id="step-detail-PIP_INSTALL_TORCH"></div>
+                            <div class="step-error" id="step-error-PIP_INSTALL_TORCH"></div>
+                        </div>
+
+                        <div class="step-row" data-step="PIP_INSTALL_REQUIREMENTS">
+                            <div class="step-row-header">
+                                <div class="step-title">4) Install ComfyUI Requirements</div>
+                                <div class="step-status-pill" id="step-status-PIP_INSTALL_REQUIREMENTS">Not started</div>
+                            </div>
+                            <div class="step-detail" id="step-detail-PIP_INSTALL_REQUIREMENTS"></div>
+                            <div class="step-error" id="step-error-PIP_INSTALL_REQUIREMENTS"></div>
+                        </div>
+
+                        <div class="step-row" data-step="INSTALL_COMFYUI_MANAGER">
+                            <div class="step-row-header">
+                                <div class="step-title">5) Install ComfyUI Manager (Custom Nodes)</div>
+                                <div class="step-status-pill" id="step-status-INSTALL_COMFYUI_MANAGER">Not started</div>
+                            </div>
+                            <div class="step-detail" id="step-detail-INSTALL_COMFYUI_MANAGER"></div>
+                            <div class="step-error" id="step-error-INSTALL_COMFYUI_MANAGER"></div>
+                        </div>
+
+                        <div class="step-row" data-step="DOWNLOAD_URLS">
+                            <div class="step-row-header">
+                                <div class="step-title">6) Provision Bundles</div>
+                                <div class="step-status-pill" id="step-status-DOWNLOAD_URLS">Not started</div>
+                            </div>
+                            <div class="step-detail" id="step-detail-DOWNLOAD_URLS"></div>
+                            <div class="step-error" id="step-error-DOWNLOAD_URLS"></div>
+                            <div id="step-download-items"></div>
+                        </div>
                     </div>
                 </div>
             </div>
@@ -324,7 +484,7 @@
 
     </main>
 
-    <script src="/static/js/remote.js?v=20260205a"></script>
+    <script src="/static/js/remote.js?v=20260205c"></script>
 </body>
 
 </html>
