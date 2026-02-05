@@ -1,3 +1,10 @@
+# /// script
+# requires-python = ">=3.11"
+# dependencies = [
+#     "requests",
+# ]
+# ///
+
 """
 ComfyUI Remote Bootstrapper
 ---------------------------
@@ -7,12 +14,7 @@ Usage:
   Edit BASE_URL and API_KEY.
   Run with uv: `uv run bootstrapper.py`
 
-/// script
-requires-python = ">=3.11"
-dependencies = [
-    "requests",
-]
-///
+
 """
 
 import os

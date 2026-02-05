@@ -5,6 +5,7 @@
 const Bundles = {
     bundles: [],
     activeBundle: null,
+    activeSourceContext: null,
 
     async init() {
         this.bindEvents();
@@ -109,9 +110,20 @@ const Bundles = {
             grouped.get(group).push(asset);
         }
 
+        const groupEntries = Array.from(grouped.entries()).map(([group, items]) => ({
+            group,
+            items,
+            totalBytes: items.reduce((sum, item) => sum + (item.size || 0), 0),
+        }));
+
+        groupEntries.sort((a, b) => {
+            if (b.totalBytes !== a.totalBytes) return b.totalBytes - a.totalBytes;
+            return a.group.localeCompare(b.group);
+        });
+
         const rows = [];
-        for (const [group, items] of grouped.entries()) {
-            const totalBytes = items.reduce((sum, item) => sum + (item.size || 0), 0);
+        for (const entry of groupEntries) {
+            const { group, items, totalBytes } = entry;
             rows.push(`
                 <tr class="asset-group-row">
                     <td colspan="4">
@@ -130,13 +142,15 @@ const Bundles = {
                         </td>
                         <td class="asset-size-cell">${a.size ? App.formatBytes(a.size) : '—'}</td>
                         <td class="asset-url-cell">
-                            ${a.source_url_override || a.source_url ? `
-                                <div style="display: flex; align-items: center; gap: 8px;">
-                                    <span title="Linked">✅</span>
+                            <div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
+                                ${a.source_url_override || a.source_url ? `<span title="Linked">✅</span>` : '<span style="color: var(--text-muted);">-</span>'}
+                                ${a.source_url_override || a.source_url ? `
                                     <button class="btn btn-small" style="font-size: 10px; padding: 2px 6px;" 
                                             onclick="Bundles.testUrl('${a.source_url_override || a.source_url}', this)">Test</button>
-                                </div>
-                            ` : '<span style="color: var(--text-muted);">-</span>'}
+                                ` : ''}
+                                <button class="btn btn-small" style="font-size: 10px; padding: 2px 6px;" 
+                                        onclick="Bundles.openSourceUrlModal('${a.relpath}', '${a.hash || ''}')">${a.source_url_override || a.source_url ? 'Edit' : 'Link'}</button>
+                            </div>
                         </td>
                         <td>
                             <button class="btn-icon btn-danger" onclick="Bundles.removeAsset('${a.relpath}')" title="Remove from bundle">✕</button>
@@ -188,6 +202,194 @@ const Bundles = {
             btn.disabled = false;
             btn.textContent = originalText;
         }
+    },
+
+    // ==================== Source URL Modal ====================
+
+    openSourceUrlModal(relpath, hash) {
+        let modal = document.getElementById('bundle-source-url-modal');
+        if (!modal) {
+            modal = document.createElement('div');
+            modal.id = 'bundle-source-url-modal';
+            modal.className = 'modal-overlay';
+            modal.innerHTML = `
+                <div class="modal-content">
+                    <div class="modal-header">
+                        <h3>🔗 Source URL</h3>
+                        <button class="modal-close" onclick="Bundles.closeSourceUrlModal()">×</button>
+                    </div>
+                    <div class="modal-body">
+                        <p class="modal-filename"></p>
+                        <p class="modal-hash"></p>
+                        <label for="bundle-source-url-input">Public Web URL:</label>
+                        <input type="url" id="bundle-source-url-input" class="modal-input" placeholder="https://huggingface.co/model-org/model-name/resolve/main/model.safetensors" />
+                        <div id="bundle-url-test-result" style="margin-top: -8px; margin-bottom: 12px; font-size: 12px; display: none;"></div>
+                        <p class="modal-hint">Enter the public download URL for this model. This allows remote provisioning to download directly from the source.</p>
+                        <p class="modal-hash-hint"></p>
+                    </div>
+                    <div class="modal-footer">
+                        <button class="btn btn-danger" id="bundle-source-url-delete" style="margin-right: auto;">Delete</button>
+                        <button class="btn" id="bundle-source-url-test">🔍 Test Link</button>
+                        <button class="btn" onclick="Bundles.closeSourceUrlModal()">Cancel</button>
+                        <button class="btn btn-primary" id="bundle-source-url-save">Save</button>
+                    </div>
+                </div>
+            `;
+            document.body.appendChild(modal);
+
+            modal.addEventListener('click', (e) => {
+                if (e.target === modal) this.closeSourceUrlModal();
+            });
+        }
+
+        const filename = relpath ? relpath.split('/').pop() : '';
+        const existingAsset = this.activeBundle?.assets?.find(a => a.relpath === relpath);
+        const existingUrl = existingAsset?.source_url_override || existingAsset?.source_url || '';
+
+        this.activeSourceContext = { relpath, hash, filename };
+        modal.querySelector('.modal-filename').textContent = `File: ${filename || relpath}`;
+        modal.querySelector('.modal-hash').textContent = hash ? `Hash: ${hash}` : `Path: ${relpath}`;
+        modal.querySelector('#bundle-source-url-input').value = existingUrl;
+
+        const hashHint = modal.querySelector('.modal-hash-hint');
+        if (!hash) {
+            hashHint.textContent = '⚠️ File not yet hashed. URL will be saved by path and a hash will be queued.';
+            hashHint.style.color = 'var(--warning)';
+            hashHint.style.marginTop = '8px';
+        } else {
+            hashHint.textContent = '';
+        }
+
+        const deleteBtn = modal.querySelector('#bundle-source-url-delete');
+        deleteBtn.style.display = existingUrl ? 'block' : 'none';
+
+        const saveBtn = modal.querySelector('#bundle-source-url-save');
+        saveBtn.onclick = () => this.saveSourceUrl();
+
+        deleteBtn.onclick = () => this.deleteSourceUrl();
+
+        const testBtn = modal.querySelector('#bundle-source-url-test');
+        const testResult = modal.querySelector('#bundle-url-test-result');
+        testResult.style.display = 'none';
+        testBtn.onclick = () => this.testSourceUrl();
+
+        modal.classList.add('visible');
+        modal.querySelector('#bundle-source-url-input').focus();
+    },
+
+    async testSourceUrl() {
+        const input = document.getElementById('bundle-source-url-input');
+        const url = input.value.trim();
+        const resultDiv = document.getElementById('bundle-url-test-result');
+        const testBtn = document.getElementById('bundle-source-url-test');
+
+        if (!url) return null;
+
+        testBtn.disabled = true;
+        testBtn.textContent = '⏱ Testing...';
+        resultDiv.style.display = 'block';
+        resultDiv.style.color = 'var(--text-muted)';
+        resultDiv.textContent = 'Checking URL connectivity...';
+
+        try {
+            const res = await App.api('GET', `/index/check-url?url=${encodeURIComponent(url)}`);
+            if (res.ok) {
+                resultDiv.style.color = 'var(--success)';
+                const sizeStr = res.size ? ` (${(res.size / (1024 * 1024)).toFixed(1)} MB)` : '';
+                resultDiv.innerHTML = `✅ Link OK! HTTP ${res.status}${sizeStr}`;
+                return res;
+            }
+            resultDiv.style.color = 'var(--danger)';
+            if (res.is_webpage) {
+                resultDiv.textContent = `❌ Error: URL is a webpage, not a file download (HTTP ${res.status})`;
+            } else {
+                resultDiv.textContent = `❌ Failed: ${res.error || 'Status ' + res.status}`;
+            }
+            return res;
+        } catch (err) {
+            resultDiv.style.color = 'var(--danger)';
+            resultDiv.textContent = `❌ Error: ${err.message}`;
+            return { ok: false, error: err.message };
+        } finally {
+            testBtn.disabled = false;
+            testBtn.textContent = '🔍 Test Link';
+        }
+    },
+
+    async saveSourceUrl() {
+        const ctx = this.activeSourceContext;
+        if (!ctx) return;
+
+        const input = document.getElementById('bundle-source-url-input');
+        const url = input.value.trim();
+        if (!url) {
+            alert('Please enter a URL');
+            return;
+        }
+
+        const testResult = await this.testSourceUrl();
+        if (testResult && !testResult.ok) {
+            const msg = testResult.is_webpage
+                ? "This URL looks like a webpage, not a direct file download. Remote downloads will likely fail.\n\nSave anyway?"
+                : "The link validation failed. Remote downloads will likely fail.\n\nSave anyway?";
+            if (!confirm(msg)) return;
+        }
+
+        try {
+            if (ctx.hash) {
+                await App.api('PUT', `/index/sources/${ctx.hash}`, {
+                    url,
+                    filename_hint: ctx.filename,
+                });
+            } else {
+                await App.api('PUT', `/index/sources/by-relpath/${encodeURIComponent(ctx.relpath)}`, {
+                    url,
+                    filename_hint: ctx.filename,
+                    queue_hash: true,
+                });
+            }
+
+            this.closeSourceUrlModal();
+            if (this.activeBundle?.name) {
+                await this.selectBundle(this.activeBundle.name);
+            }
+        } catch (err) {
+            alert('Failed to save source URL: ' + err.message);
+        }
+    },
+
+    async deleteSourceUrl() {
+        const ctx = this.activeSourceContext;
+        if (!ctx) return;
+
+        if (!confirm('Remove the source URL for this file?')) return;
+
+        try {
+            if (ctx.hash) {
+                try {
+                    await App.api('DELETE', `/index/sources/${ctx.hash}`);
+                } catch (err) {
+                    await App.api('DELETE', `/index/sources/by-relpath/${encodeURIComponent(ctx.relpath)}`);
+                }
+            } else {
+                await App.api('DELETE', `/index/sources/by-relpath/${encodeURIComponent(ctx.relpath)}`);
+            }
+
+            this.closeSourceUrlModal();
+            if (this.activeBundle?.name) {
+                await this.selectBundle(this.activeBundle.name);
+            }
+        } catch (err) {
+            alert('Failed to delete source URL: ' + err.message);
+        }
+    },
+
+    closeSourceUrlModal() {
+        const modal = document.getElementById('bundle-source-url-modal');
+        if (modal) {
+            modal.classList.remove('visible');
+        }
+        this.activeSourceContext = null;
     },
 
     // ==================== Actions ====================
