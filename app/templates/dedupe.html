@@ -95,7 +95,10 @@
                 </div>
 
                 <div class="wizard-nav">
-                    <button class="btn" id="prev-group" disabled>← Previous</button>
+                    <div class="wizard-nav-left">
+                        <button class="btn" id="prev-group" disabled>← Previous</button>
+                        <button class="btn btn-secondary" id="skip-group">Skip Group</button>
+                    </div>
                     <button class="btn btn-primary" id="next-group">Next →</button>
                 </div>
             </div>
@@ -106,6 +109,7 @@
                 <div class="review-summary">
                     <p><strong>Files to delete:</strong> <span id="delete-count">0</span></p>
                     <p><strong>Space to reclaim:</strong> <span id="reclaim-size">0 MB</span></p>
+                    <p><strong>Groups skipped:</strong> <span id="skip-count">0</span></p>
                 </div>
                 <div class="review-warning">
                     ⚠️ This action is permanent. Files will be hard-deleted.

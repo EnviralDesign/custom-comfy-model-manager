@@ -186,6 +186,18 @@ a:hover {
     box-shadow: var(--shadow-glow);
 }
 
+.btn-secondary {
+    background: rgba(148, 163, 184, 0.12);
+    border-color: rgba(148, 163, 184, 0.4);
+    color: var(--text-secondary);
+}
+
+.btn-secondary:hover:not(:disabled) {
+    background: rgba(148, 163, 184, 0.2);
+    border-color: rgba(148, 163, 184, 0.6);
+    color: var(--text-primary);
+}
+
 .btn-ai {
     background: rgba(245, 158, 11, 0.15);
     border-color: rgba(245, 158, 11, 0.5);
@@ -844,9 +856,10 @@ a:hover {
 .queue-panel {
     position: fixed;
     bottom: 0;
-    right: 20px;
-    width: 420px;
-    max-height: 350px;
+    right: 0;
+    left: 0;
+    width: 100%;
+    max-height: 380px;
     background: var(--bg-secondary);
     border: 1px solid var(--border);
     border-bottom: none;
@@ -884,9 +897,9 @@ a:hover {
 }
 
 .queue-list {
-    max-height: 280px;
+    max-height: 320px;
     overflow-y: auto;
-    padding: 8px;
+    padding: 12px 16px;
 }
 
 .empty-queue {
@@ -901,13 +914,58 @@ a:hover {
     align-items: center;
     gap: 10px;
     padding: 10px 12px;
-    background: var(--bg-tertiary);
+    background: var(--bg-secondary);
     border-radius: var(--radius-sm);
     margin-bottom: 6px;
 }
 
 .queue-item:last-child {
     margin-bottom: 0;
+}
+
+.queue-columns {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    gap: 12px;
+}
+
+.queue-column {
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+    display: flex;
+    flex-direction: column;
+    min-height: 120px;
+    max-height: 280px;
+}
+
+.queue-column-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 8px 10px;
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--text-muted);
+    border-bottom: 1px solid var(--border);
+}
+
+.queue-column-body {
+    padding: 8px;
+    overflow-y: auto;
+}
+
+.queue-count {
+    padding: 0 6px;
+    height: 18px;
+    display: inline-flex;
+    align-items: center;
+    border-radius: 999px;
+    border: 1px solid var(--border);
+    background: var(--bg-secondary);
+    color: var(--text-secondary);
+    font-size: 10px;
 }
 
 .queue-item-running {
@@ -1062,6 +1120,16 @@ a:hover {
     margin-bottom: 24px;
 }
 
+.dup-skip-banner {
+    padding: 8px 12px;
+    margin-bottom: 12px;
+    border-radius: var(--radius-sm);
+    background: rgba(148, 163, 184, 0.15);
+    border: 1px solid rgba(148, 163, 184, 0.35);
+    color: var(--text-secondary);
+    font-size: 13px;
+}
+
 .dup-file {
     display: flex;
     align-items: center;
@@ -1081,9 +1149,18 @@ a:hover {
     border: 1px solid var(--success);
 }
 
+.dup-file.skipped {
+    opacity: 0.6;
+}
+
 .wizard-nav {
     display: flex;
     justify-content: space-between;
+}
+
+.wizard-nav-left {
+    display: flex;
+    gap: 12px;
 }
 
 .review-summary {

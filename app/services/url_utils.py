@@ -86,6 +86,18 @@ def filename_matches_url(filename: str, url: str, response_filename: str | None 
     if response_filename and response_filename == filename:
         return True
 
+    def _basename(name: str) -> str:
+        if not name:
+            return ""
+        name = name.replace("\\", "/")
+        return name.rsplit("/", 1)[-1]
+
+    expected_basename = _basename(filename)
+    if expected_basename and url_name == expected_basename:
+        return True
+    if response_filename and expected_basename and response_filename == expected_basename:
+        return True
+
     def _normalize(name: str) -> str:
         return name.strip().lstrip("_")
 
@@ -94,4 +106,11 @@ def filename_matches_url(filename: str, url: str, response_filename: str | None 
         return True
     if response_filename and _normalize(response_filename) == normalized_expected:
         return True
+
+    if expected_basename:
+        normalized_expected_base = _normalize(expected_basename)
+        if url_name and _normalize(url_name) == normalized_expected_base:
+            return True
+        if response_filename and _normalize(response_filename) == normalized_expected_base:
+            return True
     return False

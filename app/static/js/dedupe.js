@@ -8,6 +8,7 @@ const Dedupe = {
     groups: [],
     currentGroupIndex: 0,
     selections: new Map(), // group_id -> keep_relpath
+    skippedGroups: new Set(), // group_id -> skipped
 
     init() {
         this.bindEvents();
@@ -49,6 +50,7 @@ const Dedupe = {
         document.getElementById('scan-lake')?.addEventListener('click', () => this.startScan('lake'));
         document.getElementById('prev-group')?.addEventListener('click', () => this.prevGroup());
         document.getElementById('next-group')?.addEventListener('click', () => this.nextGroup());
+        document.getElementById('skip-group')?.addEventListener('click', () => this.toggleSkipCurrent());
         document.getElementById('back-to-wizard')?.addEventListener('click', () => this.showStep('wizard'));
         document.getElementById('confirm-delete')?.addEventListener('click', () => this.executeDelete());
         document.getElementById('start-over')?.addEventListener('click', () => this.reset());
@@ -145,6 +147,8 @@ const Dedupe = {
         document.getElementById('total-groups').textContent = this.groups.length;
 
         // Default selection: first file in each group
+        this.selections.clear();
+        this.skippedGroups.clear();
         for (const group of this.groups) {
             if (group.files.length > 0) {
                 this.selections.set(group.id, group.files[0].relpath);
@@ -158,17 +162,21 @@ const Dedupe = {
         const group = this.groups[this.currentGroupIndex];
         if (!group) return;
 
+        const isSkipped = this.skippedGroups.has(group.id);
         document.getElementById('current-group').textContent = this.currentGroupIndex + 1;
 
         const container = document.getElementById('current-duplicate-group');
         const selectedRelpath = this.selections.get(group.id);
 
         let html = `<div class="font-mono text-muted" style="margin-bottom: 12px;">Hash: ${group.hash.substring(0, 16)}...</div>`;
+        if (isSkipped) {
+            html += `<div class="dup-skip-banner">⏸️ Skipped — no deletions will be performed for this group.</div>`;
+        }
 
         for (const file of group.files) {
-            const isSelected = file.relpath === selectedRelpath;
+            const isSelected = !isSkipped && file.relpath === selectedRelpath;
             html += `
-                <div class="dup-file ${isSelected ? 'selected' : ''}" data-relpath="${file.relpath}" data-group="${group.id}">
+                <div class="dup-file ${isSelected ? 'selected' : ''} ${isSkipped ? 'skipped' : ''}" data-relpath="${file.relpath}" data-group="${group.id}">
                     <span>${isSelected ? '✅' : '⬜'}</span>
                     <span class="file-name" style="flex: 1;">${file.relpath}</span>
                     <span class="file-size">${App.formatBytes(file.size)}</span>
@@ -183,6 +191,9 @@ const Dedupe = {
             el.addEventListener('click', () => {
                 const relpath = el.dataset.relpath;
                 const groupId = parseInt(el.dataset.group);
+                if (this.skippedGroups.has(groupId)) {
+                    this.skippedGroups.delete(groupId);
+                }
                 this.selections.set(groupId, relpath);
                 this.renderCurrentGroup();
             });
@@ -192,6 +203,10 @@ const Dedupe = {
         document.getElementById('prev-group').disabled = this.currentGroupIndex === 0;
         document.getElementById('next-group').textContent =
             this.currentGroupIndex === this.groups.length - 1 ? 'Review' : 'Next →';
+        const skipButton = document.getElementById('skip-group');
+        if (skipButton) {
+            skipButton.textContent = isSkipped ? 'Unskip Group' : 'Skip Group';
+        }
     },
 
     prevGroup() {
@@ -210,11 +225,29 @@ const Dedupe = {
         }
     },
 
+    toggleSkipCurrent() {
+        const group = this.groups[this.currentGroupIndex];
+        if (!group) return;
+        const isSkipped = this.skippedGroups.has(group.id);
+        if (isSkipped) {
+            this.skippedGroups.delete(group.id);
+            this.renderCurrentGroup();
+            return;
+        }
+        this.skippedGroups.add(group.id);
+        this.nextGroup();
+    },
+
     showReview() {
         let deleteCount = 0;
         let reclaimBytes = 0;
+        let skippedCount = 0;
 
         for (const group of this.groups) {
+            if (this.skippedGroups.has(group.id)) {
+                skippedCount++;
+                continue;
+            }
             const keepRelpath = this.selections.get(group.id);
             for (const file of group.files) {
                 if (file.relpath !== keepRelpath) {
@@ -226,15 +259,19 @@ const Dedupe = {
 
         document.getElementById('delete-count').textContent = deleteCount;
         document.getElementById('reclaim-size').textContent = App.formatBytes(reclaimBytes);
+        const skippedEl = document.getElementById('skip-count');
+        if (skippedEl) skippedEl.textContent = skippedCount;
 
         this.showStep('review');
     },
 
     async executeDelete() {
-        const selections = Array.from(this.selections.entries()).map(([groupId, keepRelpath]) => ({
-            group_id: groupId,
-            keep_relpath: keepRelpath,
-        }));
+        const selections = Array.from(this.selections.entries())
+            .filter(([groupId]) => !this.skippedGroups.has(groupId))
+            .map(([groupId, keepRelpath]) => ({
+                group_id: groupId,
+                keep_relpath: keepRelpath,
+            }));
 
         try {
             const result = await App.api('POST', '/dedupe/execute', {
@@ -258,6 +295,7 @@ const Dedupe = {
         this.groups = [];
         this.currentGroupIndex = 0;
         this.selections.clear();
+        this.skippedGroups.clear();
         this.showStep('select');
     }
 };

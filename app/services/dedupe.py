@@ -220,19 +220,24 @@ class DedupeService:
         deleted = 0
         freed = 0
         errors = []
+        if not selections:
+            return {"deleted": 0, "freed_bytes": 0, "errors": []}
         
         async with get_db() as db:
             cursor = await db.execute(
-                "SELECT g.side, f.relpath, f.size FROM dedupe_groups g JOIN dedupe_files f ON g.id = f.group_id WHERE g.scan_id = ?",
+                "SELECT g.id as group_id, g.side, f.relpath, f.size FROM dedupe_groups g JOIN dedupe_files f ON g.id = f.group_id WHERE g.scan_id = ?",
                 (scan_id,)
             )
             all_files = await cursor.fetchall()
         
         # Apply selections
-        keep_set = {s.keep_relpath for s in selections}
+        keep_by_group = {s.group_id: s.keep_relpath for s in selections}
         
         for f in all_files:
-            if f["relpath"] not in keep_set:
+            group_id = f["group_id"]
+            if group_id not in keep_by_group:
+                continue
+            if f["relpath"] != keep_by_group[group_id]:
                 root = self._get_root(f["side"])
                 filepath = root / f["relpath"].replace("/", "\\")
                 try:

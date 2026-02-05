@@ -8,6 +8,7 @@ const App = {
     wsReconnectMs: 1000,
     queueTasks: [],
     downloadJobs: [],
+    aiLookupJobs: [],
     downloadRefreshHandle: null,
 
     init() {
@@ -50,6 +51,9 @@ const App = {
             case 'task_complete':
                 this.loadQueueTasks();  // Reload to remove completed task
                 break;
+            case 'ai_lookup_update':
+                this.loadAiLookupJobs();
+                break;
         }
         // Dispatch custom event for page-specific handlers
         document.dispatchEvent(new CustomEvent('ws:' + msg.type, { detail: msg.data }));
@@ -80,7 +84,10 @@ const App = {
         this.loadQueueTasks();
 
         if (!this.downloadRefreshHandle) {
-            this.downloadRefreshHandle = setInterval(() => this.loadDownloadJobs(), 2000);
+            this.downloadRefreshHandle = setInterval(() => {
+                this.loadDownloadJobs();
+                this.loadAiLookupJobs();
+            }, 2000);
         }
     },
 
@@ -98,6 +105,7 @@ const App = {
             const tasks = await this.api('GET', '/queue/tasks');
             this.queueTasks = tasks;
             await this.loadDownloadJobs(false);
+            await this.loadAiLookupJobs(false);
             this.renderQueue();
         } catch (err) {
             console.error('Failed to load queue:', err);
@@ -113,6 +121,18 @@ const App = {
             }
         } catch (err) {
             console.error('Failed to load downloads:', err);
+        }
+    },
+
+    async loadAiLookupJobs(render = true) {
+        try {
+            const jobs = await this.api('GET', '/ai/lookup/jobs');
+            this.aiLookupJobs = Array.isArray(jobs) ? jobs : [];
+            if (render) {
+                this.renderQueue();
+            }
+        } catch (err) {
+            console.error('Failed to load AI lookup jobs:', err);
         }
     },
 
@@ -135,12 +155,16 @@ const App = {
             .filter(j => j.status === 'queued' || j.status === 'running')
             .sort((a, b) => a.id - b.id);
 
-        if (pending.length === 0 && downloadPending.length === 0) {
+        const aiLookupPending = (this.aiLookupJobs || [])
+            .filter(j => j.status === 'pending' || j.status === 'running')
+            .sort((a, b) => a.id - b.id);
+
+        if (pending.length === 0 && downloadPending.length === 0 && aiLookupPending.length === 0) {
             list.innerHTML = '<div class="empty-queue">No pending tasks</div>';
             return;
         }
 
-        const queueHtml = pending.map(task => {
+        const renderTaskItem = (task) => {
             const progress = task.size_bytes > 0
                 ? Math.round((task.bytes_transferred || 0) / task.size_bytes * 100)
                 : 0;
@@ -174,9 +198,10 @@ const App = {
                 </div>
                 <button class="btn-icon btn-cancel" data-task-id="${task.id}" title="Cancel">✕</button>
             </div>
-        `}).join('');
+        `;
+        };
 
-        const downloadHtml = downloadPending.map(job => {
+        const renderDownloadItem = (job) => {
             const pct =
                 job.total_bytes && job.total_bytes > 0
                     ? Math.min(100, (job.bytes_downloaded / job.total_bytes) * 100)
@@ -196,27 +221,76 @@ const App = {
                 <button class="btn-icon btn-cancel btn-cancel-download" data-download-id="${job.id}" title="Cancel">✕</button>
             </div>
         `;
-        }).join('');
+        };
 
-        const sections = [];
-        if (queueHtml) {
-            sections.push(`
-                <div class="queue-section">
-                    <div class="queue-section-title">Queue</div>
-                    ${queueHtml}
+        const renderAiLookupItem = (job) => {
+            const label = job.filename || job.relpath || 'model lookup';
+            const statusText = job.status === 'running' ? '⚡ Running' : '⏳ Pending';
+            return `
+            <div class="queue-item queue-item-${job.status}" data-ai-lookup-id="${job.id}">
+                <span class="queue-icon">✨</span>
+                <div class="queue-info">
+                    <div class="queue-path">${this.truncatePath(label)}</div>
+                    <div class="queue-meta">${statusText}</div>
                 </div>
-            `);
-        }
-        if (downloadHtml) {
-            sections.push(`
-                <div class="queue-section">
-                    <div class="queue-section-title">Downloads</div>
-                    ${downloadHtml}
-                </div>
-            `);
-        }
+                <button class="btn-icon btn-cancel btn-cancel-ai" data-ai-lookup-id="${job.id}" title="Cancel">✕</button>
+            </div>
+        `;
+        };
 
-        list.innerHTML = sections.join('');
+        const groups = [
+            {
+                title: 'Transfers',
+                items: pending.filter(t => t.task_type === 'copy' || t.task_type === 'move'),
+                renderer: renderTaskItem,
+            },
+            {
+                title: 'Integrity',
+                items: pending.filter(t => t.task_type === 'hash_file' || t.task_type === 'verify'),
+                renderer: renderTaskItem,
+            },
+            {
+                title: 'Cleanup',
+                items: pending.filter(t => t.task_type === 'delete'),
+                renderer: renderTaskItem,
+            },
+            {
+                title: 'Maintenance',
+                items: pending.filter(t => t.task_type === 'dedupe_scan'),
+                renderer: renderTaskItem,
+            },
+            {
+                title: 'Downloads',
+                items: downloadPending,
+                renderer: renderDownloadItem,
+            },
+            {
+                title: 'AI Lookup',
+                items: aiLookupPending,
+                renderer: renderAiLookupItem,
+            },
+        ];
+
+        list.innerHTML = `
+            <div class="queue-columns">
+                ${groups
+                    .map(group => {
+                        const body = group.items.length
+                            ? group.items.map(group.renderer).join('')
+                            : '<div class="empty-queue">No pending tasks</div>';
+                        return `
+                        <div class="queue-column">
+                            <div class="queue-column-header">
+                                <span>${group.title}</span>
+                                <span class="queue-count">${group.items.length}</span>
+                            </div>
+                            <div class="queue-column-body">${body}</div>
+                        </div>
+                    `;
+                    })
+                    .join('')}
+            </div>
+        `;
 
         // Bind cancel buttons
         list.querySelectorAll('.btn-cancel').forEach(btn => {
@@ -229,6 +303,10 @@ const App = {
                 const downloadId = btn.dataset.downloadId;
                 if (downloadId) {
                     this.cancelDownload(downloadId);
+                }
+                const aiLookupId = btn.dataset.aiLookupId;
+                if (aiLookupId) {
+                    this.cancelAiLookup(aiLookupId);
                 }
             });
         });
@@ -249,6 +327,15 @@ const App = {
             await this.loadDownloadJobs();
         } catch (err) {
             console.error('Cancel download failed:', err);
+        }
+    },
+
+    async cancelAiLookup(jobId) {
+        try {
+            await this.api('POST', `/ai/lookup/jobs/${jobId}/cancel`);
+            await this.loadAiLookupJobs();
+        } catch (err) {
+            console.error('Cancel AI lookup failed:', err);
         }
     },
 
