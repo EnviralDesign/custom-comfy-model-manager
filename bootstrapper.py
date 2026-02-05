@@ -35,6 +35,7 @@ BASE_URL = "https://dl.enviral-design.com"  # Set to your home app URL
 API_KEY = "PASTE_KEY_HERE"          # Set to your session key
 HF_API_KEY = os.environ.get("HF_API_KEY", "").strip()
 CIVITAI_API_KEY = os.environ.get("CIVITAI_API_KEY", "").strip()
+PROMPT_OPTIONAL_KEYS = os.environ.get("PROMPT_OPTIONAL_KEYS", "").strip().lower() in {"1", "true", "yes", "y"}
 TORCH_INDEX_URL = os.environ.get("TORCH_INDEX_URL", "").strip()
 TORCH_INDEX_FLAG = os.environ.get("TORCH_INDEX_FLAG", "--extra-index-url").strip()
 TORCH_PACKAGES = os.environ.get("TORCH_PACKAGES", "torch torchvision torchaudio").split()
@@ -49,6 +50,7 @@ STALL_TIMEOUT = 45
 COMFY_DIR = None
 MODELS_DIR = None
 COMFY_DIR_ENV = os.environ.get("COMFY_DIR", "").strip()
+DEFAULT_COMFY_DIR = "ComfyUI"
 
 # --- IMPORTS ---
 import requests
@@ -684,33 +686,34 @@ def main():
         except KeyboardInterrupt:
             return
 
-    if not HF_API_KEY:
-        try:
-            val = input("Enter Hugging Face API Key (optional, press Enter to skip): ").strip()
-            if val:
-                HF_API_KEY = val
-        except KeyboardInterrupt:
-            return
+    if PROMPT_OPTIONAL_KEYS:
+        if not HF_API_KEY:
+            try:
+                val = input("Enter Hugging Face API Key (optional, press Enter to skip): ").strip()
+                if val:
+                    HF_API_KEY = val
+            except KeyboardInterrupt:
+                return
 
-    if not CIVITAI_API_KEY:
-        try:
-            val = input("Enter Civitai API Key (optional, press Enter to skip): ").strip()
-            if val:
-                CIVITAI_API_KEY = val
-        except KeyboardInterrupt:
-            return
+        if not CIVITAI_API_KEY:
+            try:
+                val = input("Enter Civitai API Key (optional, press Enter to skip): ").strip()
+                if val:
+                    CIVITAI_API_KEY = val
+            except KeyboardInterrupt:
+                return
 
     # Configure ComfyUI directory
     comfy_path = COMFY_DIR_ENV
     if not comfy_path:
         try:
-            comfy_path = input("Enter ComfyUI path (existing or to create): ").strip()
+            comfy_path = input(f"Enter ComfyUI path (blank for default: {DEFAULT_COMFY_DIR}): ").strip()
         except KeyboardInterrupt:
             return
 
     if not comfy_path:
-        print("No ComfyUI path provided. Exiting.")
-        return
+        comfy_path = DEFAULT_COMFY_DIR
+        print(f"Using default ComfyUI path: {comfy_path}")
 
     expanded = Path(os.path.expanduser(comfy_path)).resolve()
     if not expanded.exists():
