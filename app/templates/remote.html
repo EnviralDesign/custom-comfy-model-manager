@@ -181,10 +181,7 @@
         }
 
         .step-row {
-            border: 1px solid var(--border);
-            border-radius: var(--radius-md);
-            padding: 12px;
-            background: var(--bg-tertiary);
+            margin: 0;
         }
 
         .step-row-header {
@@ -275,6 +272,58 @@
             color: var(--text-secondary);
             border-color: rgba(148, 163, 184, 0.4);
             background: rgba(148, 163, 184, 0.1);
+        }
+
+        .action-btn {
+            width: 100%;
+            text-align: left;
+            padding: 0.85rem 1rem;
+            min-height: 52px;
+            display: flex;
+            align-items: center;
+        }
+
+        .step-row {
+            display: grid;
+            grid-template-columns: minmax(260px, 320px) 1fr;
+            gap: 14px;
+            align-items: stretch;
+        }
+
+        .step-action-pane {
+            border: 1px solid var(--border);
+            border-radius: var(--radius-md);
+            background: rgba(15, 23, 42, 0.26);
+            padding: 10px;
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+
+        .step-status-pane {
+            border: 1px solid var(--border);
+            border-radius: var(--radius-md);
+            background: var(--bg-tertiary);
+            padding: 12px;
+        }
+
+        .bundle-provision-list {
+            margin-bottom: 0.25rem;
+            max-height: 220px;
+            overflow-y: auto;
+            border: 1px solid var(--border);
+            border-radius: var(--radius-sm);
+            padding: 8px;
+        }
+
+        .provision-help {
+            margin-bottom: 0.25rem;
+        }
+
+        @media (max-width: 1100px) {
+            .step-row {
+                grid-template-columns: 1fr;
+            }
         }
     </style>
 </head>
@@ -378,105 +427,109 @@
         <!-- Actions Panel -->
         <div class="panel" id="actions-panel" style="grid-column: 1 / -1; display: none;">
             <div class="panel-header">
-                <div class="panel-title">🛠️ Actions</div>
+                <div class="panel-title">🛠️ Actions & Step Status</div>
             </div>
 
-            <div class="remote-actions-grid" style="display: grid; grid-template-columns: 280px 1fr; gap: 3rem;">
-                <!-- Action Buttons -->
-                <div class="action-buttons">
-                    <h4 class="mb-4">ComfyUI Install (Manual Steps)</h4>
-                    <button id="btn-install-comfy" class="btn btn-secondary w-full"
-                        style="text-align: left; margin-bottom: 1rem; padding: 1rem;">
-                        1) 📦 Clone ComfyUI Repo
-                    </button>
-                    <button id="btn-create-venv" class="btn btn-secondary w-full"
-                        style="text-align: left; margin-bottom: 1rem; padding: 1rem;">
-                        2) 🐍 Create Venv (Python 3.13)
-                    </button>
-                    <button id="btn-install-torch" class="btn btn-secondary w-full"
-                        style="text-align: left; margin-bottom: 0.5rem; padding: 1rem;">
-                        3) 🔥 Install PyTorch (with index URL)
-                    </button>
-                    <div id="torch-index-display" class="text-secondary text-sm" style="margin-bottom: 1rem;">
-                        Index URL: ...
+            <div id="remote-step-list" class="step-list">
+                <div class="step-row">
+                    <div class="step-action-pane">
+                        <button id="btn-run-all" class="btn btn-primary action-btn">
+                            ▶ Run All Setup (1-5)
+                        </button>
+                        <div class="text-xs text-secondary">Queues steps 1 through 5 in order.</div>
                     </div>
-                    <button id="btn-install-requirements" class="btn btn-secondary w-full"
-                        style="text-align: left; margin-bottom: 1rem; padding: 1rem;">
-                        4) 📦 Install ComfyUI Requirements
-                    </button>
-                    <button id="btn-install-manager" class="btn btn-secondary w-full"
-                        style="text-align: left; margin-bottom: 1rem; padding: 1rem;">
-                        5) 🧩 Install ComfyUI Manager (Custom Nodes)
-                    </button>
-
-                    <h4 class="mb-4 mt-6">Provisioning</h4>
-                    <div id="bundle-provision-list"
-                        style="margin-bottom: 1rem; max-height: 200px; overflow-y: auto; border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 8px;">
-                        <div class="text-secondary text-sm">Loading bundles...</div>
+                    <div class="step-status-pane">
+                        <div class="text-secondary text-sm">Manual mode is still available via individual step buttons.</div>
                     </div>
-                    <button id="btn-provision-bundles" class="btn btn-primary w-full" style="padding: 1rem;">
-                        📥 Provision Selected Bundles
-                    </button>
                 </div>
 
-                <!-- Task List -->
-                <div class="task-list-container">
-                    <h4 class="mb-4">Step Status</h4>
-                    <div id="remote-step-list" class="step-list">
-                        <div class="step-row" data-step="COMFY_GIT_CLONE">
-                            <div class="step-row-header">
+                <div class="step-row" data-step="COMFY_GIT_CLONE">
+                    <div class="step-action-pane">
+                        <button id="btn-install-comfy" class="btn btn-secondary action-btn">1) 📦 Clone ComfyUI Repo</button>
+                    </div>
+                    <div class="step-status-pane">
+                        <div class="step-row-header">
                                 <div class="step-title">1) Clone ComfyUI Repo</div>
                                 <div class="step-status-pill" id="step-status-COMFY_GIT_CLONE">Not started</div>
-                            </div>
-                            <div class="step-detail" id="step-detail-COMFY_GIT_CLONE"></div>
-                            <div class="step-error" id="step-error-COMFY_GIT_CLONE"></div>
                         </div>
+                        <div class="step-detail" id="step-detail-COMFY_GIT_CLONE"></div>
+                        <div class="step-error" id="step-error-COMFY_GIT_CLONE"></div>
+                    </div>
+                </div>
 
-                        <div class="step-row" data-step="CREATE_VENV">
-                            <div class="step-row-header">
+                <div class="step-row" data-step="CREATE_VENV">
+                    <div class="step-action-pane">
+                        <button id="btn-create-venv" class="btn btn-secondary action-btn">2) 🐍 Create Venv (Python 3.13)</button>
+                    </div>
+                    <div class="step-status-pane">
+                        <div class="step-row-header">
                                 <div class="step-title">2) Create Venv (Python 3.13)</div>
                                 <div class="step-status-pill" id="step-status-CREATE_VENV">Not started</div>
-                            </div>
-                            <div class="step-detail" id="step-detail-CREATE_VENV"></div>
-                            <div class="step-error" id="step-error-CREATE_VENV"></div>
                         </div>
+                        <div class="step-detail" id="step-detail-CREATE_VENV"></div>
+                        <div class="step-error" id="step-error-CREATE_VENV"></div>
+                    </div>
+                </div>
 
-                        <div class="step-row" data-step="PIP_INSTALL_TORCH">
-                            <div class="step-row-header">
+                <div class="step-row" data-step="PIP_INSTALL_TORCH">
+                    <div class="step-action-pane">
+                        <button id="btn-install-torch" class="btn btn-secondary action-btn">3) 🔥 Install PyTorch (with index URL)</button>
+                        <div id="torch-index-display" class="text-secondary text-sm">Index URL: ...</div>
+                    </div>
+                    <div class="step-status-pane">
+                        <div class="step-row-header">
                                 <div class="step-title">3) Install PyTorch (with index URL)</div>
                                 <div class="step-status-pill" id="step-status-PIP_INSTALL_TORCH">Not started</div>
-                            </div>
-                            <div class="step-detail" id="step-detail-PIP_INSTALL_TORCH"></div>
-                            <div class="step-error" id="step-error-PIP_INSTALL_TORCH"></div>
                         </div>
+                        <div class="step-detail" id="step-detail-PIP_INSTALL_TORCH"></div>
+                        <div class="step-error" id="step-error-PIP_INSTALL_TORCH"></div>
+                    </div>
+                </div>
 
-                        <div class="step-row" data-step="PIP_INSTALL_REQUIREMENTS">
-                            <div class="step-row-header">
+                <div class="step-row" data-step="PIP_INSTALL_REQUIREMENTS">
+                    <div class="step-action-pane">
+                        <button id="btn-install-requirements" class="btn btn-secondary action-btn">4) 📦 Install ComfyUI Requirements</button>
+                    </div>
+                    <div class="step-status-pane">
+                        <div class="step-row-header">
                                 <div class="step-title">4) Install ComfyUI Requirements</div>
                                 <div class="step-status-pill" id="step-status-PIP_INSTALL_REQUIREMENTS">Not started</div>
-                            </div>
-                            <div class="step-detail" id="step-detail-PIP_INSTALL_REQUIREMENTS"></div>
-                            <div class="step-error" id="step-error-PIP_INSTALL_REQUIREMENTS"></div>
                         </div>
+                        <div class="step-detail" id="step-detail-PIP_INSTALL_REQUIREMENTS"></div>
+                        <div class="step-error" id="step-error-PIP_INSTALL_REQUIREMENTS"></div>
+                    </div>
+                </div>
 
-                        <div class="step-row" data-step="INSTALL_COMFYUI_MANAGER">
-                            <div class="step-row-header">
+                <div class="step-row" data-step="INSTALL_COMFYUI_MANAGER">
+                    <div class="step-action-pane">
+                        <button id="btn-install-manager" class="btn btn-secondary action-btn">5) 🧩 Install ComfyUI Manager (Custom Nodes)</button>
+                    </div>
+                    <div class="step-status-pane">
+                        <div class="step-row-header">
                                 <div class="step-title">5) Install ComfyUI Manager (Custom Nodes)</div>
                                 <div class="step-status-pill" id="step-status-INSTALL_COMFYUI_MANAGER">Not started</div>
-                            </div>
-                            <div class="step-detail" id="step-detail-INSTALL_COMFYUI_MANAGER"></div>
-                            <div class="step-error" id="step-error-INSTALL_COMFYUI_MANAGER"></div>
                         </div>
+                        <div class="step-detail" id="step-detail-INSTALL_COMFYUI_MANAGER"></div>
+                        <div class="step-error" id="step-error-INSTALL_COMFYUI_MANAGER"></div>
+                    </div>
+                </div>
 
-                        <div class="step-row" data-step="DOWNLOAD_URLS">
-                            <div class="step-row-header">
+                <div class="step-row" data-step="DOWNLOAD_URLS">
+                    <div class="step-action-pane">
+                        <div id="bundle-provision-list" class="bundle-provision-list">
+                            <div class="text-secondary text-sm">Loading bundles...</div>
+                        </div>
+                        <div class="text-xs text-secondary provision-help">Only checked bundles are queued in step 6.</div>
+                        <button id="btn-provision-bundles" class="btn btn-primary action-btn">📥 Provision Selected Bundles</button>
+                    </div>
+                    <div class="step-status-pane">
+                        <div class="step-row-header">
                                 <div class="step-title">6) Provision Bundles</div>
                                 <div class="step-status-pill" id="step-status-DOWNLOAD_URLS">Not started</div>
-                            </div>
-                            <div class="step-detail" id="step-detail-DOWNLOAD_URLS"></div>
-                            <div class="step-error" id="step-error-DOWNLOAD_URLS"></div>
-                            <div id="step-download-items"></div>
                         </div>
+                        <div class="step-detail" id="step-detail-DOWNLOAD_URLS"></div>
+                        <div class="step-error" id="step-error-DOWNLOAD_URLS"></div>
+                        <div id="step-download-items"></div>
                     </div>
                 </div>
             </div>
@@ -484,7 +537,7 @@
 
     </main>
 
-    <script src="/static/js/remote.js?v=20260205c"></script>
+    <script src="/static/js/remote.js?v=20260205d"></script>
 </body>
 
 </html>

@@ -23,6 +23,7 @@ document.addEventListener('DOMContentLoaded', () => {
         btnInstallTorch: document.getElementById('btn-install-torch'),
         btnInstallRequirements: document.getElementById('btn-install-requirements'),
         btnInstallManager: document.getElementById('btn-install-manager'),
+        btnRunAll: document.getElementById('btn-run-all'),
         stepList: document.getElementById('remote-step-list'),
         stepDownloadItems: document.getElementById('step-download-items'),
         bundleList: document.getElementById('bundle-provision-list'),
@@ -92,21 +93,16 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     async function enqueueTask(type, payload = {}, label = "") {
-        try {
-            const res = await fetch('/api/remote/tasks/enqueue?label=' + encodeURIComponent(label), {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ type, payload })
-            });
-            if (res.ok) {
-                fetchTasks();
-            } else {
-                alert('Failed to enqueue task');
-            }
-        } catch (e) {
-            console.error(e);
-            alert('Error enqueueing task');
+        const res = await fetch('/api/remote/tasks/enqueue?label=' + encodeURIComponent(label), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ type, payload })
+        });
+        if (!res.ok) {
+            throw new Error(await extractErrorMessage(res, `Failed to enqueue ${type}`));
         }
+        fetchTasks();
+        return res.json();
     }
 
     async function fetchTasks() {
@@ -155,6 +151,7 @@ document.addEventListener('DOMContentLoaded', () => {
             return;
         }
 
+        els.btnProvision.disabled = true;
         try {
             // 1. Resolve bundles to URLs
             const res = await fetch('/api/bundles/resolve', {
@@ -162,6 +159,9 @@ document.addEventListener('DOMContentLoaded', () => {
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ bundle_names: selected })
             });
+            if (!res.ok) {
+                throw new Error(await extractErrorMessage(res, 'Bundle resolve failed'));
+            }
             const data = await res.json();
 
             if (!data.assets || data.assets.length === 0) {
@@ -169,21 +169,60 @@ document.addEventListener('DOMContentLoaded', () => {
                 return;
             }
 
+            // Deduplicate by relpath and skip malformed entries
+            const uniq = new Map();
+            data.assets.forEach(a => {
+                if (!a || !a.relpath || !a.url) return;
+                if (!uniq.has(a.relpath)) uniq.set(a.relpath, a);
+            });
+            const items = Array.from(uniq.values()).map(a => ({
+                relpath: a.relpath,
+                url: a.url,
+                hash: a.hash,
+                size_bytes: a.size,
+                provider: providerFromUrl(a.url)
+            }));
+            if (items.length === 0) {
+                alert('No valid assets to provision after filtering.');
+                return;
+            }
+
             // 2. Enqueue the download task
             // Payload format for DOWNLOAD_URLS: { items: [ {relpath, url, hash, size_bytes}, ... ] }
             await enqueueTask('DOWNLOAD_URLS', {
-                items: data.assets.map(a => ({
-                    relpath: a.relpath,
-                    url: a.url,
-                    hash: a.hash,
-                    size_bytes: a.size,
-                    provider: providerFromUrl(a.url)
-                }))
+                items
             }, `Download ${selected.join(', ')}`);
 
         } catch (e) {
             console.error('Provisioning failed', e);
             alert('Failed to provision: ' + e.message);
+        } finally {
+            els.btnProvision.disabled = false;
+        }
+    }
+
+    async function runAllSetup() {
+        if (!remoteConfig.torch_index_url) {
+            alert('Torch index URL is not configured.');
+            return;
+        }
+
+        els.btnRunAll.disabled = true;
+        try {
+            await enqueueTask('COMFY_GIT_CLONE', {}, 'Clone ComfyUI Repo');
+            await enqueueTask('CREATE_VENV', {}, 'Create Venv (Python 3.13)');
+            await enqueueTask('PIP_INSTALL_TORCH', {
+                packages: remoteConfig.torch_packages,
+                index_url: remoteConfig.torch_index_url,
+                index_flag: remoteConfig.torch_index_flag
+            }, 'Install PyTorch (index URL)');
+            await enqueueTask('PIP_INSTALL_REQUIREMENTS', {}, 'Install ComfyUI Requirements');
+            await enqueueTask('INSTALL_COMFYUI_MANAGER', {}, 'Install ComfyUI Manager');
+        } catch (e) {
+            console.error('Run all enqueue failed', e);
+            alert('Failed to queue full setup: ' + e.message);
+        } finally {
+            els.btnRunAll.disabled = false;
         }
     }
 
@@ -328,7 +367,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
         const rows = items.map(item => {
             const relpath = item.relpath || item.url || 'unknown';
-            const status = statusMap[relpath] || 'pending';
+            const status = statusMap[relpath] || statusMap[item.url] || 'pending';
             const provider = (item.provider || providerFromUrl(item.url) || 'web').toLowerCase();
             if (status === 'completed' || status === 'failed' || status === 'skipped') {
                 doneCount += 1;
@@ -372,7 +411,8 @@ document.addEventListener('DOMContentLoaded', () => {
     function providerFromUrl(url) {
         if (!url) return 'web';
         try {
-            const u = new URL(url);
+            const u = new URL(url, window.location.origin);
+            if (u.pathname.startsWith('/api/remote/assets/file')) return 'local';
             const host = u.host.toLowerCase();
             if (host === window.location.host.toLowerCase()) return 'local';
             if (host.endsWith('huggingface.co') || host.endsWith('hf.co')) return 'huggingface';
@@ -421,6 +461,16 @@ document.addEventListener('DOMContentLoaded', () => {
             setTimeout(() => btn.textContent = orig, 2000);
         });
     };
+
+    async function extractErrorMessage(res, fallback) {
+        try {
+            const data = await res.json();
+            if (data && typeof data.detail === 'string') return data.detail;
+            return fallback;
+        } catch (e) {
+            return fallback;
+        }
+    }
 
     function updateCountdown() {
         if (!expiryTime) {
@@ -483,6 +533,10 @@ document.addEventListener('DOMContentLoaded', () => {
         els.btnInstallManager.addEventListener('click', () => {
             enqueueTask('INSTALL_COMFYUI_MANAGER', {}, 'Install ComfyUI Manager');
         });
+    }
+
+    if (els.btnRunAll) {
+        els.btnRunAll.addEventListener('click', runAllSetup);
     }
 
     if (els.btnProvision) els.btnProvision.addEventListener('click', provisionBundles);

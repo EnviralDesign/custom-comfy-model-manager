@@ -10,8 +10,11 @@ from fastapi import HTTPException, status, Request
 from fastapi.responses import StreamingResponse
 
 
+DEFAULT_STREAM_CHUNK_SIZE = 1024 * 1024  # 1 MiB
+
+
 def send_bytes_range_requests(
-    file_obj: BinaryIO, start: int, end: int, chunk_size: int = 64 * 1024
+    file_obj: BinaryIO, start: int, end: int, chunk_size: int = DEFAULT_STREAM_CHUNK_SIZE
 ) -> Generator[bytes, None, None]:
     """Yield chunks of bytes from file_obj between start and end."""
     file_obj.seek(start)
@@ -37,11 +40,15 @@ def range_requests_response(
     range_header = request.headers.get("range")
 
     if not range_header:
-         # No range, serve full file
-         # We use StreamingResponse with a generator to avoid loading large files into RAM
+        # No range, stream full file in fixed-size binary chunks.
+        # Do not iterate file object directly (line-based iteration is slow for binary payloads).
         def iterfile():
             with open(file_path, "rb") as f:
-                yield from f
+                while True:
+                    chunk = f.read(DEFAULT_STREAM_CHUNK_SIZE)
+                    if not chunk:
+                        break
+                    yield chunk
         
         return StreamingResponse(
             iterfile(),

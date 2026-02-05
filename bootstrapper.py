@@ -26,6 +26,7 @@ import platform
 import subprocess
 import hashlib
 import threading
+import re
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from urllib.parse import urlparse
@@ -39,6 +40,9 @@ PROMPT_OPTIONAL_KEYS = os.environ.get("PROMPT_OPTIONAL_KEYS", "").strip().lower(
 TORCH_INDEX_URL = os.environ.get("TORCH_INDEX_URL", "").strip()
 TORCH_INDEX_FLAG = os.environ.get("TORCH_INDEX_FLAG", "--extra-index-url").strip()
 TORCH_PACKAGES = os.environ.get("TORCH_PACKAGES", "torch torchvision torchaudio").split()
+DOWNLOAD_MAX_RETRIES = max(1, int(os.environ.get("DOWNLOAD_MAX_RETRIES", "3")))
+DOWNLOAD_RETRY_BACKOFF_SECONDS = max(0.0, float(os.environ.get("DOWNLOAD_RETRY_BACKOFF_SECONDS", "2")))
+EXTRA_PIP_PACKAGES = [p for p in os.environ.get("EXTRA_PIP_PACKAGES", "sageattention").split() if p]
 BASE_HOST = urlparse(BASE_URL).netloc.lower()
 
 # --- CONSTANTS ---
@@ -355,10 +359,36 @@ def handle_install_requirements(task):
     update_progress(task['id'], "running", 0.0, "Installing requirements.txt...")
     cmd = [str(venv_python), "-m", "pip", "install", "-r", "requirements.txt"]
     rc, _, err = run_cmd(cmd, cwd=COMFY_DIR)
-    if rc == 0:
-        update_progress(task['id'], "completed", 1.0, "Requirements installed")
-    else:
+    if rc != 0:
         update_progress(task['id'], "failed", 0.0, "Requirements install failed", error=err)
+        return
+
+    if EXTRA_PIP_PACKAGES:
+        extras_label = " ".join(EXTRA_PIP_PACKAGES)
+        update_progress(task['id'], "running", 0.7, f"Installing extra dependencies: {extras_label}")
+        extra_cmd = [str(venv_python), "-m", "pip", "install", "-U", *EXTRA_PIP_PACKAGES]
+        rc, _, err = run_cmd(extra_cmd, cwd=COMFY_DIR)
+        if rc != 0:
+            update_progress(task['id'], "failed", 0.0, "Extra dependency install failed", error=err)
+            return
+
+        def package_to_import_name(spec: str) -> str:
+            # Strip version/extra markers from package spec; fallback dash->underscore.
+            base = re.split(r"[<>=!~\[\]]", spec, maxsplit=1)[0].strip()
+            if not base:
+                return spec.replace("-", "_")
+            return base.replace("-", "_")
+
+        imports_to_verify = [package_to_import_name(p) for p in EXTRA_PIP_PACKAGES]
+        update_progress(task['id'], "running", 0.9, f"Verifying imports: {' '.join(imports_to_verify)}")
+        for mod in imports_to_verify:
+            verify_cmd = [str(venv_python), "-c", f"import {mod}"]
+            rc, _, err = run_cmd(verify_cmd, cwd=COMFY_DIR)
+            if rc != 0:
+                update_progress(task['id'], "failed", 0.0, f"Import check failed: {mod}", error=err)
+                return
+
+    update_progress(task['id'], "completed", 1.0, "Requirements installed")
 
 def handle_install_manager(task):
     if not ensure_comfy_dir(task['id']):
@@ -383,47 +413,75 @@ def handle_install_manager(task):
         update_progress(task['id'], "failed", 0.0, "ComfyUI-Manager install failed", error=err)
 
 def download_from_source(url, dest_path, task_id, existing_size=0, extra_headers=None, session=None):
-    headers = {}
-    if extra_headers:
-        headers.update(extra_headers)
-    mode = 'wb'
-    if existing_size > 0:
-        headers['Range'] = f'bytes={existing_size}-'
-        mode = 'ab'
-        
-    try:
-        sess = session or download_session
-        with sess.get(url, headers=headers, stream=True, timeout=STALL_TIMEOUT) as r:
-            r.raise_for_status()
-            
-            # Handle potential 416 (Range Not Satisfiable) if file is already complete?
-            # Convention: if server returns 200 instead of 206, it ignored Range. Reset file.
-            if existing_size > 0 and r.status_code == 200:
-                mode = 'wb'
-                existing_size = 0
-            
-            total_size = int(r.headers.get('content-length', 0)) + existing_size
-            downloaded = existing_size
-            
-            log(f"Downloading to {dest_path.name} (Resuming from {existing_size})" if existing_size else f"Downloading {dest_path.name}")
+    sess = session or download_session
+    attempt = 0
+    while attempt < DOWNLOAD_MAX_RETRIES:
+        attempt += 1
+        headers = {}
+        if extra_headers:
+            headers.update(extra_headers)
+        mode = 'wb'
+        attempt_existing = existing_size
+        if attempt_existing > 0:
+            headers['Range'] = f'bytes={attempt_existing}-'
+            mode = 'ab'
 
-            with open(dest_path, mode) as f:
-                last_update = time.time()
-                for chunk in r.iter_content(chunk_size=CHUNK_SIZE):
-                    if chunk:
-                        f.write(chunk)
-                        downloaded += len(chunk)
-                        
-                        # Throttle updates to ~1s
-                        now = time.time()
-                        if now - last_update > 1.0:
-                            pct = downloaded / total_size if total_size else 0
-                            update_progress(task_id, "running", pct, f"Downloading: {int(pct*100)}%")
-                            last_update = now
-            
-            return True, None
-    except Exception as e:
-        return False, str(e)
+        try:
+            with sess.get(url, headers=headers, stream=True, timeout=STALL_TIMEOUT) as r:
+                # Retry transient upstream server failures
+                if r.status_code >= 500:
+                    body_preview = ""
+                    try:
+                        body_preview = (r.text or "").strip()
+                    except Exception:
+                        body_preview = ""
+                    if attempt < DOWNLOAD_MAX_RETRIES:
+                        wait_s = DOWNLOAD_RETRY_BACKOFF_SECONDS * attempt
+                        log(f"Transient HTTP {r.status_code} from source, retrying in {wait_s:.1f}s (attempt {attempt}/{DOWNLOAD_MAX_RETRIES})")
+                        time.sleep(wait_s)
+                        continue
+                    snippet = f" Body: {body_preview[:240]}" if body_preview else ""
+                    return False, f"Upstream HTTP {r.status_code} from source after {DOWNLOAD_MAX_RETRIES} attempts.{snippet}"
+
+                r.raise_for_status()
+
+                # If server ignored Range, restart file write from zero.
+                if attempt_existing > 0 and r.status_code == 200:
+                    mode = 'wb'
+                    attempt_existing = 0
+
+                total_size = int(r.headers.get('content-length', 0)) + attempt_existing
+                downloaded = attempt_existing
+
+                log(
+                    f"Downloading to {dest_path.name} (Resuming from {attempt_existing})"
+                    if attempt_existing else f"Downloading {dest_path.name}"
+                )
+
+                with open(dest_path, mode) as f:
+                    last_update = time.time()
+                    for chunk in r.iter_content(chunk_size=CHUNK_SIZE):
+                        if chunk:
+                            f.write(chunk)
+                            downloaded += len(chunk)
+
+                            # Throttle updates to ~1s
+                            now = time.time()
+                            if now - last_update > 1.0:
+                                pct = downloaded / total_size if total_size else 0
+                                update_progress(task_id, "running", pct, f"Downloading: {int(pct*100)}%")
+                                last_update = now
+
+                return True, None
+        except Exception as e:
+            if attempt < DOWNLOAD_MAX_RETRIES:
+                wait_s = DOWNLOAD_RETRY_BACKOFF_SECONDS * attempt
+                log(f"Download error, retrying in {wait_s:.1f}s (attempt {attempt}/{DOWNLOAD_MAX_RETRIES}): {e}", error=True)
+                time.sleep(wait_s)
+                continue
+            return False, str(e)
+
+    return False, "Download retries exhausted."
 
 def handle_download(task):
     payload = task.get('payload', {})

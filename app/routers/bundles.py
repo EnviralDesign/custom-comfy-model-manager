@@ -5,6 +5,7 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
 from app.services.bundle_service import get_bundle_service, Bundle, BundleAsset, ResolvedAsset
+from app.config import get_settings
 
 router = APIRouter()
 
@@ -137,8 +138,14 @@ async def resolve_bundles(request: ResolveBundlesRequest, req: Request):
     if not request.bundle_names:
         raise HTTPException(status_code=400, detail="At least one bundle name required")
     
-    # Build server base URL for local file serving
-    server_base_url = f"{req.url.scheme}://{req.url.netloc}"
+    # Build base URL for remote file serving.
+    # Prefer configured tunnel URL so remote agents never receive localhost URLs.
+    settings = get_settings()
+    configured = (settings.remote_base_url or "").strip()
+    if configured and "your.domain.example" not in configured:
+        server_base_url = configured
+    else:
+        server_base_url = f"{req.url.scheme}://{req.url.netloc}"
     
     service = get_bundle_service()
     resolved = await service.resolve_bundles(request.bundle_names, server_base_url)
