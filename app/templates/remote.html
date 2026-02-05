@@ -133,6 +133,46 @@
             font-weight: bold;
             color: var(--text-highlight);
         }
+
+        .download-items {
+            margin-top: 6px;
+            padding: 8px;
+            border: 1px solid var(--border);
+            border-radius: var(--radius-sm);
+            background: var(--bg-tertiary);
+            max-height: 220px;
+            overflow-y: auto;
+        }
+
+        .download-item {
+            display: flex;
+            justify-content: space-between;
+            gap: 12px;
+            padding: 4px 0;
+            border-bottom: 1px dashed var(--border);
+        }
+
+        .download-item:last-child {
+            border-bottom: none;
+        }
+
+        .download-item-path {
+            font-family: var(--font-mono);
+            font-size: 11px;
+            color: var(--text-secondary);
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+            flex: 1;
+        }
+
+        .download-item-status {
+            font-size: 10px;
+            text-transform: uppercase;
+            letter-spacing: 0.06em;
+            font-weight: 600;
+            flex-shrink: 0;
+        }
     </style>
 </head>
 
@@ -241,14 +281,25 @@
             <div class="remote-actions-grid" style="display: grid; grid-template-columns: 280px 1fr; gap: 3rem;">
                 <!-- Action Buttons -->
                 <div class="action-buttons">
-                    <h4 class="mb-4">Commands</h4>
+                    <h4 class="mb-4">ComfyUI Install (Manual Steps)</h4>
                     <button id="btn-install-comfy" class="btn btn-secondary w-full"
                         style="text-align: left; margin-bottom: 1rem; padding: 1rem;">
-                        📦 Install ComfyUI (Scaffold)
+                        1) 📦 Clone ComfyUI Repo
                     </button>
                     <button id="btn-create-venv" class="btn btn-secondary w-full"
                         style="text-align: left; margin-bottom: 1rem; padding: 1rem;">
-                        🐍 Create Venv (Python 3.13)
+                        2) 🐍 Create Venv (Python 3.13)
+                    </button>
+                    <button id="btn-install-torch" class="btn btn-secondary w-full"
+                        style="text-align: left; margin-bottom: 0.5rem; padding: 1rem;">
+                        3) 🔥 Install PyTorch (with index URL)
+                    </button>
+                    <div id="torch-index-display" class="text-secondary text-sm" style="margin-bottom: 1rem;">
+                        Index URL: ...
+                    </div>
+                    <button id="btn-install-requirements" class="btn btn-secondary w-full"
+                        style="text-align: left; margin-bottom: 1rem; padding: 1rem;">
+                        4) 📦 Install ComfyUI Requirements
                     </button>
 
                     <h4 class="mb-4 mt-6">Provisioning</h4>
@@ -273,7 +324,7 @@
 
     </main>
 
-    <script src="/static/js/remote.js"></script>
+    <script src="/static/js/remote.js?v=20260205a"></script>
 </body>
 
 </html>

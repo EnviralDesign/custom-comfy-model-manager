@@ -33,6 +33,9 @@ BASE_URL = "https://dl.enviral-design.com"  # Set to your home app URL
 API_KEY = "PASTE_KEY_HERE"          # Set to your session key
 HF_API_KEY = os.environ.get("HF_API_KEY", "").strip()
 CIVITAI_API_KEY = os.environ.get("CIVITAI_API_KEY", "").strip()
+TORCH_INDEX_URL = os.environ.get("TORCH_INDEX_URL", "").strip()
+TORCH_INDEX_FLAG = os.environ.get("TORCH_INDEX_FLAG", "--extra-index-url").strip()
+TORCH_PACKAGES = os.environ.get("TORCH_PACKAGES", "torch torchvision torchaudio").split()
 remote_root_dir = "~/comfy_remote"  # Where to install things
 BASE_HOST = urlparse(BASE_URL).netloc.lower()
 
@@ -100,11 +103,12 @@ def get_next_task():
         log(f"Polling error: {e}", error=True)
         return None
 
-def update_progress(task_id, status, progress=None, message=None, error=None):
+def update_progress(task_id, status, progress=None, message=None, error=None, meta=None):
     payload = {"task_id": task_id, "status": status}
     if progress is not None: payload["progress"] = progress
     if message: payload["message"] = message
     if error: payload["error"] = error
+    if meta: payload["meta"] = meta
     
     try:
         api_session.post(f"{BASE_URL}/api/remote/tasks/progress", json=payload)
@@ -142,6 +146,50 @@ def auth_headers_for_source(provider: str, url: str) -> dict:
     if provider == "civitai" and CIVITAI_API_KEY:
         return {"Authorization": f"Bearer {CIVITAI_API_KEY}"}
     return {}
+
+def get_venv_python() -> Path:
+    venv_path = COMFY_DIR / ".venv"
+    if platform.system().lower().startswith("win"):
+        return venv_path / "Scripts" / "python.exe"
+    return venv_path / "bin" / "python"
+
+def run_cmd(cmd, cwd=None):
+    try:
+        process = subprocess.Popen(
+            cmd,
+            cwd=str(cwd) if cwd else None,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True
+        )
+        stdout, stderr = process.communicate()
+        return process.returncode, stdout, stderr
+    except FileNotFoundError as e:
+        return 127, "", str(e)
+
+def ensure_pip(task_id) -> tuple[bool, str]:
+    venv_python = get_venv_python()
+    if not venv_python.exists():
+        return False, "Venv python not found."
+
+    rc, _, err = run_cmd([str(venv_python), "-m", "pip", "--version"], cwd=COMFY_DIR)
+    if rc == 0:
+        return True, ""
+
+    update_progress(task_id, "running", 0.0, "Bootstrapping pip...")
+    rc, _, err = run_cmd([str(venv_python), "-m", "ensurepip", "--upgrade"], cwd=COMFY_DIR)
+    if rc == 0:
+        rc, _, err = run_cmd([str(venv_python), "-m", "pip", "--version"], cwd=COMFY_DIR)
+        if rc == 0:
+            return True, ""
+
+    rc, _, err = run_cmd(["uv", "pip", "install", "--python", str(venv_python), "pip"], cwd=COMFY_DIR)
+    if rc == 0:
+        rc, _, err = run_cmd([str(venv_python), "-m", "pip", "--version"], cwd=COMFY_DIR)
+        if rc == 0:
+            return True, ""
+
+    return False, err or "pip bootstrap failed."
 
 # --- TASK HANDLERS ---
 
@@ -207,7 +255,11 @@ def handle_create_venv(task):
         
         if process.returncode == 0:
             log("Venv created successfully.")
-            update_progress(task['id'], "completed", 1.0, "Venv created")
+            ok, err = ensure_pip(task['id'])
+            if ok:
+                update_progress(task['id'], "completed", 1.0, "Venv created")
+            else:
+                update_progress(task['id'], "failed", 0.0, "Venv created but pip is missing", error=err)
         else:
             log(f"Venv creation failed: {stderr}", error=True)
             update_progress(task['id'], "failed", 0.0, "Venv creation failed", error=stderr)
@@ -215,6 +267,70 @@ def handle_create_venv(task):
     except Exception as e:
         log(f"Venv error: {e}", error=True)
         update_progress(task['id'], "failed", 0.0, str(e), error=str(e))
+
+def handle_install_torch(task):
+    payload = task.get('payload', {})
+    packages = payload.get('packages') or TORCH_PACKAGES
+    if isinstance(packages, str):
+        packages = packages.split()
+
+    index_url = payload.get('index_url') or TORCH_INDEX_URL
+    index_flag = payload.get('index_flag') or TORCH_INDEX_FLAG or "--extra-index-url"
+
+    if not COMFY_DIR.exists():
+        update_progress(task['id'], "failed", 0.0, "ComfyUI directory not found. Install first.")
+        return
+
+    venv_python = get_venv_python()
+    if not venv_python.exists():
+        update_progress(task['id'], "failed", 0.0, "Venv not found. Create venv first.")
+        return
+
+    if not index_url:
+        update_progress(task['id'], "failed", 0.0, "Torch index URL not set.")
+        return
+
+    ok, err = ensure_pip(task['id'])
+    if not ok:
+        update_progress(task['id'], "failed", 0.0, "pip is missing in venv", error=err)
+        return
+
+    update_progress(task['id'], "running", 0.0, "Upgrading pip...")
+    rc, _, err = run_cmd([str(venv_python), "-m", "pip", "install", "--upgrade", "pip"], cwd=COMFY_DIR)
+    if rc != 0:
+        update_progress(task['id'], "failed", 0.0, "pip upgrade failed", error=err)
+        return
+
+    cmd = [str(venv_python), "-m", "pip", "install", *packages, index_flag, index_url]
+    update_progress(task['id'], "running", 0.1, f"Installing PyTorch ({index_flag} {index_url})...")
+    rc, _, err = run_cmd(cmd, cwd=COMFY_DIR)
+    if rc == 0:
+        update_progress(task['id'], "completed", 1.0, "PyTorch installed")
+    else:
+        update_progress(task['id'], "failed", 0.0, "PyTorch install failed", error=err)
+
+def handle_install_requirements(task):
+    if not COMFY_DIR.exists():
+        update_progress(task['id'], "failed", 0.0, "ComfyUI directory not found. Install first.")
+        return
+
+    venv_python = get_venv_python()
+    if not venv_python.exists():
+        update_progress(task['id'], "failed", 0.0, "Venv not found. Create venv first.")
+        return
+
+    ok, err = ensure_pip(task['id'])
+    if not ok:
+        update_progress(task['id'], "failed", 0.0, "pip is missing in venv", error=err)
+        return
+
+    update_progress(task['id'], "running", 0.0, "Installing requirements.txt...")
+    cmd = [str(venv_python), "-m", "pip", "install", "-r", "requirements.txt"]
+    rc, _, err = run_cmd(cmd, cwd=COMFY_DIR)
+    if rc == 0:
+        update_progress(task['id'], "completed", 1.0, "Requirements installed")
+    else:
+        update_progress(task['id'], "failed", 0.0, "Requirements install failed", error=err)
 
 def download_from_source(url, dest_path, task_id, existing_size=0, extra_headers=None):
     headers = {}
@@ -350,14 +466,36 @@ def handle_download_urls(task):
         return
 
     total_items = len(items)
-    update_progress(task['id'], "running", 0.0, f"Starting batch download of {total_items} items...")
+    items_status = {}
+    for i, item in enumerate(items):
+        key = item.get('relpath') or item.get('url') or f"item_{i+1}"
+        items_status[key] = "pending"
+
+    update_progress(
+        task['id'],
+        "running",
+        0.0,
+        f"Starting batch download of {total_items} items...",
+        meta={"items_status": items_status, "items_total": total_items, "items_done": 0}
+    )
+    done_count = 0
 
     for i, item in enumerate(items):
         relpath = item.get('relpath')
         url = item.get('url')
         file_hash = item.get('hash')
+        item_key = relpath or url or f"item_{i+1}"
         
         if not relpath or not url:
+            items_status[item_key] = "skipped"
+            done_count += 1
+            update_progress(
+                task['id'],
+                "running",
+                done_count / total_items,
+                f"Skipping {item_key} (missing data)",
+                meta={"items_status": {item_key: "skipped"}, "items_done": done_count}
+            )
             continue
             
         dest_path = MODELS_DIR / relpath
@@ -367,10 +505,26 @@ def handle_download_urls(task):
         if dest_path.exists():
             # Simple size check could be added here
             log(f"[{i+1}/{total_items}] {relpath} already exists. Skipping.")
+            items_status[item_key] = "skipped"
+            done_count += 1
+            update_progress(
+                task['id'],
+                "running",
+                done_count / total_items,
+                f"Skipping existing: {relpath}",
+                meta={"items_status": {item_key: "skipped"}, "items_done": done_count}
+            )
             continue
 
         log(f"[{i+1}/{total_items}] Downloading {relpath}...")
-        update_progress(task['id'], "running", i / total_items, f"Downloading {i+1}/{total_items}: {relpath}")
+        items_status[item_key] = "downloading"
+        update_progress(
+            task['id'],
+            "running",
+            done_count / total_items,
+            f"Downloading {i+1}/{total_items}: {relpath}",
+            meta={"items_status": {item_key: "downloading"}, "items_done": done_count}
+        )
         
         temp_dest = dest_path.with_suffix(dest_path.suffix + ".part")
         
@@ -393,9 +547,20 @@ def handle_download_urls(task):
         if ok:
             temp_dest.rename(dest_path)
             log(f"Successfully downloaded {relpath}")
+            items_status[item_key] = "completed"
         else:
             log(f"Failed to download {relpath}: {err}", error=True)
             # We continue with other items even if one fails
+            items_status[item_key] = "failed"
+
+        done_count += 1
+        update_progress(
+            task['id'],
+            "running",
+            done_count / total_items,
+            f"Processed {i+1}/{total_items}: {relpath}",
+            meta={"items_status": {item_key: items_status[item_key]}, "items_done": done_count}
+        )
     
     update_progress(task['id'], "completed", 1.0, f"Batch download finished. Processed {total_items} items.")
 
@@ -461,6 +626,10 @@ def main():
                     handle_download(task)
                 elif task['type'] == 'DOWNLOAD_URLS':
                     handle_download_urls(task)
+                elif task['type'] == 'PIP_INSTALL_TORCH':
+                    handle_install_torch(task)
+                elif task['type'] == 'PIP_INSTALL_REQUIREMENTS':
+                    handle_install_requirements(task)
                 else:
                     log(f"Unknown task type: {task['type']}")
                     update_progress(task['id'], "failed", error="Unknown task type")

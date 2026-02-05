@@ -21,6 +21,9 @@ class SessionStatusResponse(BaseModel):
     agent_info: dict
     last_heartbeat: Optional[str]
     remote_base_url: str
+    torch_index_url: str
+    torch_index_flag: str
+    torch_packages: List[str]
 
 class EnableSessionResponse(BaseModel):
     api_key: str
@@ -43,6 +46,9 @@ async def get_status():
     
     settings = get_settings()
     status_dict["remote_base_url"] = settings.remote_base_url
+    status_dict["torch_index_url"] = settings.remote_torch_index_url
+    status_dict["torch_index_flag"] = settings.remote_torch_index_flag
+    status_dict["torch_packages"] = settings.remote_torch_packages.split()
     
     return status_dict
 

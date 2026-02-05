@@ -130,6 +130,19 @@ class RemoteSessionManager:
                     t.message = update.message
                 if update.error:
                     t.error = update.error
+                if update.meta:
+                    if t.meta is None:
+                        t.meta = {}
+                    for key, value in update.meta.items():
+                        if key == "items_status" and isinstance(value, dict):
+                            existing = t.meta.get("items_status")
+                            if isinstance(existing, dict):
+                                existing.update(value)
+                                t.meta["items_status"] = existing
+                            else:
+                                t.meta["items_status"] = value
+                        else:
+                            t.meta[key] = value
                 
                 # Timestamps
                 if update.status == "running" and not t.started_at:

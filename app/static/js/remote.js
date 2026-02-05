@@ -20,13 +20,21 @@ document.addEventListener('DOMContentLoaded', () => {
         actionsPanel: document.getElementById('actions-panel'),
         btnInstallComfy: document.getElementById('btn-install-comfy'),
         btnCreateVenv: document.getElementById('btn-create-venv'),
+        btnInstallTorch: document.getElementById('btn-install-torch'),
+        btnInstallRequirements: document.getElementById('btn-install-requirements'),
         taskList: document.getElementById('remote-task-list'),
         bundleList: document.getElementById('bundle-provision-list'),
-        btnProvision: document.getElementById('btn-provision-bundles')
+        btnProvision: document.getElementById('btn-provision-bundles'),
+        torchIndexDisplay: document.getElementById('torch-index-display')
     };
 
     let pollInterval = null;
     let expiryTime = null;
+    let remoteConfig = {
+        torch_index_url: '',
+        torch_index_flag: '',
+        torch_packages: []
+    };
 
     // --- Actions ---
 
@@ -145,7 +153,7 @@ document.addEventListener('DOMContentLoaded', () => {
             }
 
             // 2. Enqueue the download task
-            // Payload format for DOWNLOAD_URLS: { urls: [ {relpath, url, hash}, ... ] }
+            // Payload format for DOWNLOAD_URLS: { items: [ {relpath, url, hash}, ... ] }
             await enqueueTask('DOWNLOAD_URLS', {
                 items: data.assets.map(a => ({
                     relpath: a.relpath,
@@ -165,6 +173,15 @@ document.addEventListener('DOMContentLoaded', () => {
     function render(data) {
         // Base URL
         els.baseUrl.textContent = data.remote_base_url;
+        remoteConfig.torch_index_url = data.torch_index_url || '';
+        remoteConfig.torch_index_flag = data.torch_index_flag || '';
+        remoteConfig.torch_packages = Array.isArray(data.torch_packages) ? data.torch_packages : [];
+
+        if (els.torchIndexDisplay) {
+            const flag = remoteConfig.torch_index_flag || '--extra-index-url';
+            const url = remoteConfig.torch_index_url || '(unset)';
+            els.torchIndexDisplay.textContent = `Index URL: ${flag} ${url} (from .env)`;
+        }
 
         // Session State
         if (data.is_active) {
@@ -224,6 +241,8 @@ document.addEventListener('DOMContentLoaded', () => {
 
             const progress = t.progress ? `(${Math.round(t.progress * 100)}%)` : '';
 
+            const downloadItemsHtml = t.type === 'DOWNLOAD_URLS' ? renderDownloadItems(t) : '';
+
             return `
             <div class="queue-item" style="padding: 8px; border-bottom: 1px solid var(--border-dim);">
                 <div style="display:flex; justify-content:space-between; margin-bottom: 4px;">
@@ -234,9 +253,49 @@ document.addEventListener('DOMContentLoaded', () => {
                 </div>
                 <div class="text-xs text-secondary" style="white-space: pre-wrap;">${t.message || ''}</div>
                 ${t.error ? `<div class="text-xs text-danger mt-1">${t.error}</div>` : ''}
+                ${downloadItemsHtml}
             </div>
             `;
         }).join('');
+    }
+
+    function renderDownloadItems(task) {
+        const items = (task.payload && Array.isArray(task.payload.items)) ? task.payload.items : [];
+        if (items.length === 0) return '';
+
+        const statusMap = (task.meta && task.meta.items_status) || {};
+        let doneCount = 0;
+
+        const rows = items.map(item => {
+            const relpath = item.relpath || item.url || 'unknown';
+            const status = statusMap[relpath] || 'pending';
+            if (status === 'completed' || status === 'failed' || status === 'skipped') {
+                doneCount += 1;
+            }
+
+            let statusClass = 'text-secondary';
+            if (status === 'downloading') statusClass = 'text-primary';
+            if (status === 'completed') statusClass = 'text-success';
+            if (status === 'skipped') statusClass = 'text-warning';
+            if (status === 'failed') statusClass = 'text-danger';
+
+            return `
+            <div class="download-item">
+                <div class="download-item-path" title="${relpath}">${relpath}</div>
+                <div class="download-item-status ${statusClass}">${status}</div>
+            </div>
+            `;
+        }).join('');
+
+        const total = items.length;
+        const done = (task.meta && Number.isFinite(task.meta.items_done)) ? task.meta.items_done : doneCount;
+
+        return `
+            <div class="text-xs text-secondary" style="margin-top:6px;">Items: ${done}/${total} done</div>
+            <div class="download-items">
+                ${rows}
+            </div>
+        `;
     }
 
     // --- Utils ---
@@ -273,18 +332,42 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // --- Init ---
 
-    els.enableBtn.addEventListener('click', enableSession);
-    els.endBtn.addEventListener('click', endSession);
+    if (els.enableBtn) els.enableBtn.addEventListener('click', enableSession);
+    if (els.endBtn) els.endBtn.addEventListener('click', endSession);
 
-    els.btnInstallComfy.addEventListener('click', () => {
-        enqueueTask('COMFY_GIT_CLONE', {}, 'Install ComfyUI');
-    });
+    if (els.btnInstallComfy) {
+        els.btnInstallComfy.addEventListener('click', () => {
+            enqueueTask('COMFY_GIT_CLONE', {}, 'Clone ComfyUI Repo');
+        });
+    }
 
-    els.btnCreateVenv.addEventListener('click', () => {
-        enqueueTask('CREATE_VENV', {}, 'Create Venv (uv 3.13)');
-    });
+    if (els.btnCreateVenv) {
+        els.btnCreateVenv.addEventListener('click', () => {
+            enqueueTask('CREATE_VENV', {}, 'Create Venv (Python 3.13)');
+        });
+    }
 
-    els.btnProvision.addEventListener('click', provisionBundles);
+    if (els.btnInstallTorch) {
+        els.btnInstallTorch.addEventListener('click', () => {
+            if (!remoteConfig.torch_index_url) {
+                alert('Torch index URL is not configured.');
+                return;
+            }
+            enqueueTask('PIP_INSTALL_TORCH', {
+                packages: remoteConfig.torch_packages,
+                index_url: remoteConfig.torch_index_url,
+                index_flag: remoteConfig.torch_index_flag
+            }, 'Install PyTorch (index URL)');
+        });
+    }
+
+    if (els.btnInstallRequirements) {
+        els.btnInstallRequirements.addEventListener('click', () => {
+            enqueueTask('PIP_INSTALL_REQUIREMENTS', {}, 'Install ComfyUI Requirements');
+        });
+    }
+
+    if (els.btnProvision) els.btnProvision.addEventListener('click', provisionBundles);
 
     // Initial load
     fetchStatus();

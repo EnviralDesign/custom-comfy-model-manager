@@ -6,7 +6,14 @@ from uuid import uuid4, UUID
 from datetime import datetime
 
 TaskStatus = Literal["pending", "running", "completed", "failed", "cancelled"]
-TaskType = Literal["COMFY_GIT_CLONE", "CREATE_VENV", "ASSET_DOWNLOAD"]
+TaskType = Literal[
+    "COMFY_GIT_CLONE",
+    "CREATE_VENV",
+    "ASSET_DOWNLOAD",
+    "DOWNLOAD_URLS",
+    "PIP_INSTALL_TORCH",
+    "PIP_INSTALL_REQUIREMENTS",
+]
 
 class RemoteTaskBase(BaseModel):
     type: TaskType
@@ -27,6 +34,7 @@ class RemoteTask(RemoteTaskBase):
     
     # Metadata for UI
     label: str = "" 
+    meta: dict = Field(default_factory=dict)
 
 class TaskProgressUpdate(BaseModel):
     task_id: str
@@ -34,3 +42,4 @@ class TaskProgressUpdate(BaseModel):
     progress: Optional[float] = None
     message: Optional[str] = None
     error: Optional[str] = None
+    meta: Optional[dict] = None

@@ -34,6 +34,9 @@ class Settings(BaseSettings):
     # Remote Session (Phase 2)
     remote_base_url: str = "https://your.domain.example"
     remote_session_ttl_minutes: int = 240
+    remote_torch_index_url: str = "https://download.pytorch.org/whl/cu130"
+    remote_torch_index_flag: str = "--extra-index-url"
+    remote_torch_packages: str = "torch torchvision torchaudio"
 
     # xAI (Grok) - AI URL discovery
     xai_api_key: str | None = None
