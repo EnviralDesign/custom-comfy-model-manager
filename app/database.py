@@ -96,6 +96,27 @@ CREATE TABLE IF NOT EXISTS safetensors_cache (
 
 CREATE INDEX IF NOT EXISTS idx_safetensors_cache_relpath ON safetensors_cache(relpath);
 
+-- Downloader jobs (persistent)
+CREATE TABLE IF NOT EXISTS download_jobs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    url TEXT NOT NULL,
+    filename TEXT,
+    provider TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('queued', 'running', 'completed', 'failed', 'cancelled')),
+    bytes_downloaded INTEGER DEFAULT 0,
+    total_bytes INTEGER,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    error_message TEXT,
+    attempts INTEGER DEFAULT 0,
+    dest_path TEXT,
+    temp_path TEXT,
+    target_root TEXT,
+    record_source INTEGER DEFAULT 0
+);
+
+CREATE INDEX IF NOT EXISTS idx_download_jobs_status ON download_jobs(status);
+
 -- AI lookup jobs: background Grok web search and review workflow
 CREATE TABLE IF NOT EXISTS ai_lookup_jobs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,

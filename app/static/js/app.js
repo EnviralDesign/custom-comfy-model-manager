@@ -152,7 +152,13 @@ const App = {
                     ? '📁'
                     : task.task_type === 'verify'
                         ? '🔍'
-                        : '🗑️';
+                        : task.task_type === 'hash_file'
+                            ? '🔑'
+                            : task.task_type === 'dedupe_scan'
+                                ? '🧹'
+                                : task.task_type === 'delete'
+                                    ? '🗑️'
+                                    : '•';
 
             return `
             <div class="queue-item queue-item-${task.status}" data-task-id="${task.id}">
@@ -265,6 +271,14 @@ const App = {
             if (meta) {
                 meta.textContent = `⚡ ${data.progress_pct}% • ${this.formatBytes(data.bytes_transferred)} / ${this.formatBytes(data.total_bytes)}`;
             }
+        }
+
+        // Keep cached queueTasks in sync so periodic re-render doesn't regress
+        const task = this.queueTasks.find(t => String(t.id) === String(data.task_id));
+        if (task) {
+            task.bytes_transferred = data.bytes_transferred;
+            task.size_bytes = data.total_bytes;
+            task.status = 'running';
         }
     },
 

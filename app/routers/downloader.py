@@ -16,7 +16,6 @@ class DownloadRequest(BaseModel):
     url: HttpUrl
     filename: Optional[str] = None
     provider: Optional[str] = Field(default="auto", description="auto|civitai|huggingface|generic")
-    api_key: Optional[str] = None
     start_now: bool = False
 
 
@@ -52,7 +51,6 @@ async def create_download_job(request: DownloadRequest):
         url=str(request.url),
         filename=request.filename,
         provider=request.provider,
-        api_key_override=request.api_key,
         start_now=request.start_now,
     )
     return DownloadJobResponse(**job.to_dict())
@@ -77,7 +75,6 @@ async def create_download_job_to_folder(request: DownloadToFolderRequest):
         url=str(request.url),
         filename=None,
         provider="auto",
-        api_key_override=None,
         start_now=request.start_now,
         dest_dir=dest_dir,
         target_root=target_root,

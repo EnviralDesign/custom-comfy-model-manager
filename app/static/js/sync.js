@@ -18,6 +18,8 @@ const Sync = {
     safetensorsTags: new Map(),
     safetensorsPending: new Set(),
     safetensorsRenderTimer: null,
+    safetensorsBatchQueue: new Map(),
+    safetensorsBatchTimer: null,
     dragRelpath: null,
     moveContext: null,
     minMetricSizeBytes: 5 * 1024 * 1024,
@@ -634,7 +636,7 @@ const Sync = {
         const relpath = file.relpath;
 
         if (!this.safetensorsTags.has(relpath) && !this.safetensorsPending.has(relpath)) {
-            this.fetchSafetensorsTags(relpath, side);
+            this.queueSafetensorsBatch(relpath, side);
         }
 
         const info = this.safetensorsTags.get(relpath);
@@ -669,27 +671,60 @@ const Sync = {
         }, 120);
     },
 
-    async fetchSafetensorsTags(relpath, side) {
+    queueSafetensorsBatch(relpath, side) {
+        if (side === 'auto') return;
         this.safetensorsPending.add(relpath);
+        this.safetensorsBatchQueue.set(relpath, side);
+        this.scheduleSafetensorsBatch();
         this.scheduleSafetensorsRender();
-        try {
-            const res = await App.api(
-                'GET',
-                `/index/safetensors/classify?relpath=${encodeURIComponent(relpath)}&side=${encodeURIComponent(side)}`
-            );
-            this.safetensorsTags.set(relpath, {
-                tags: res.tags || [],
-                confidence: res.confidence || 0,
-                signals: res.signals || [],
-            });
-        } catch (err) {
-            this.safetensorsTags.set(relpath, {
-                status: 'error',
-                error: err.message || 'Classification failed',
-            });
-        } finally {
-            this.safetensorsPending.delete(relpath);
-            this.scheduleSafetensorsRender();
+    },
+
+    scheduleSafetensorsBatch() {
+        clearTimeout(this.safetensorsBatchTimer);
+        this.safetensorsBatchTimer = setTimeout(() => {
+            this.flushSafetensorsBatch();
+        }, 180);
+    },
+
+    async flushSafetensorsBatch() {
+        const entries = Array.from(this.safetensorsBatchQueue.entries());
+        if (entries.length === 0) return;
+        this.safetensorsBatchQueue.clear();
+
+        const chunkSize = 200;
+        for (let i = 0; i < entries.length; i += chunkSize) {
+            const chunk = entries.slice(i, i + chunkSize);
+            const items = chunk.map(([relpath, side]) => ({ relpath, side }));
+
+            try {
+                const res = await App.api('POST', '/index/safetensors/classify-batch', { items });
+                const results = res?.results || [];
+                results.forEach((item) => {
+                    if (item.status === 'error') {
+                        this.safetensorsTags.set(item.relpath, {
+                            status: 'error',
+                            error: item.error || 'Classification failed',
+                        });
+                    } else {
+                        this.safetensorsTags.set(item.relpath, {
+                            tags: item.tags || [],
+                            confidence: item.confidence || 0,
+                            signals: item.signals || [],
+                        });
+                    }
+                    this.safetensorsPending.delete(item.relpath);
+                });
+            } catch (err) {
+                chunk.forEach(([relpath]) => {
+                    this.safetensorsTags.set(relpath, {
+                        status: 'error',
+                        error: err.message || 'Classification failed',
+                    });
+                    this.safetensorsPending.delete(relpath);
+                });
+            } finally {
+                this.scheduleSafetensorsRender();
+            }
         }
     },
 

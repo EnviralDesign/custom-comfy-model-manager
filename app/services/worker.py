@@ -569,6 +569,7 @@ class QueueWorker:
     async def _execute_hash_file(self, task: dict):
         """Execute a single file hash task."""
         import blake3
+        import time
         
         relpath = task["src_relpath"]
         task_id = task["id"]
@@ -600,6 +601,14 @@ class QueueWorker:
                 hasher = blake3.blake3()
                 file_size = path.stat().st_size
                 bytes_read = 0
+                last_db_update_time = 0.0
+
+                async with get_db() as db:
+                    await db.execute(
+                        "UPDATE queue SET size_bytes = ?, bytes_transferred = 0 WHERE id = ?",
+                        (file_size, task_id)
+                    )
+                    await db.commit()
                 
                 async with aiofiles.open(path, 'rb') as f:
                     while chunk := await f.read(1024 * 1024):
@@ -612,7 +621,16 @@ class QueueWorker:
                         # Progress update
                         if file_size > 0:
                             pct = int((bytes_read / file_size) * 100)
-                            if pct % 20 == 0:
+                            now_ts = time.time()
+                            if now_ts - last_db_update_time > 1.0 or bytes_read == file_size:
+                                async with get_db() as db:
+                                    await db.execute(
+                                        "UPDATE queue SET bytes_transferred = ? WHERE id = ?",
+                                        (bytes_read, task_id)
+                                    )
+                                    await db.commit()
+                                last_db_update_time = now_ts
+                            if pct % 20 == 0 or bytes_read == file_size:
                                 await broadcast("queue_progress", {
                                     "task_id": task_id,
                                     "bytes_transferred": bytes_read,

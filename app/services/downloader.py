@@ -81,9 +81,9 @@ class DownloadJob:
     temp_path: Path | None = None
     target_root: Path | None = None
     record_source: bool = False
-    api_key_override: str | None = None
     cancelled: bool = False
     force_start: bool = False
+    last_persist_ts: float = 0.0
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -112,6 +112,7 @@ class DownloadManager:
         self._next_id = 1
         self._session = requests.Session()
         self._running = True
+        self._loaded = False
         threading.Thread(target=self._scheduler_loop, daemon=True).start()
 
     @classmethod
@@ -119,6 +120,137 @@ class DownloadManager:
         if cls._instance is None:
             cls._instance = cls()
         return cls._instance
+
+    async def load_persisted_jobs(self) -> None:
+        if self._loaded:
+            return
+        self._loaded = True
+
+        settings = get_settings()
+        downloads_dir = settings.get_downloads_dir().resolve()
+        now = _now_iso()
+
+        async with get_db() as db:
+            await db.execute(
+                "UPDATE download_jobs SET status = 'queued', updated_at = ? WHERE status = 'running'",
+                (now,),
+            )
+            await db.commit()
+
+            cursor = await db.execute(
+                "SELECT * FROM download_jobs WHERE status IN ('queued', 'running')"
+            )
+            rows = await cursor.fetchall()
+
+        max_id = 0
+        for row in rows:
+            job_id = row["id"]
+            max_id = max(max_id, job_id)
+
+            dest_path = Path(row["dest_path"]) if row["dest_path"] else None
+            temp_path = Path(row["temp_path"]) if row["temp_path"] else None
+            target_root = Path(row["target_root"]) if row["target_root"] else None
+            record_source = bool(row["record_source"])
+
+            invalid_reason = None
+            if not dest_path:
+                invalid_reason = "missing destination path"
+            elif target_root:
+                try:
+                    if not str(dest_path.resolve()).startswith(str(target_root.resolve())):
+                        invalid_reason = "destination no longer under target root"
+                except Exception:
+                    invalid_reason = "invalid destination path"
+            else:
+                try:
+                    if not str(dest_path.resolve()).startswith(str(downloads_dir)):
+                        invalid_reason = "destination no longer under downloads directory"
+                except Exception:
+                    invalid_reason = "invalid destination path"
+
+            if invalid_reason:
+                async with get_db() as db:
+                    await db.execute(
+                        """
+                        UPDATE download_jobs
+                        SET status = 'failed', error_message = ?, updated_at = ?
+                        WHERE id = ?
+                        """,
+                        (invalid_reason, now, job_id),
+                    )
+                    await db.commit()
+                continue
+
+            if not temp_path and dest_path:
+                temp_path = dest_path.with_suffix(dest_path.suffix + ".part")
+
+            bytes_downloaded = row["bytes_downloaded"] or 0
+            if temp_path and temp_path.exists():
+                try:
+                    bytes_downloaded = temp_path.stat().st_size
+                except Exception:
+                    pass
+
+            job = DownloadJob(
+                id=job_id,
+                url=row["url"],
+                filename=row["filename"],
+                provider=row["provider"],
+                status="queued",
+                bytes_downloaded=bytes_downloaded,
+                total_bytes=row["total_bytes"],
+                created_at=row["created_at"],
+                updated_at=row["updated_at"],
+                error_message=row["error_message"],
+                attempts=row["attempts"] or 0,
+                dest_path=dest_path,
+                temp_path=temp_path,
+                target_root=target_root,
+                record_source=record_source,
+            )
+
+            self._jobs[job_id] = job
+
+        if max_id >= self._next_id:
+            self._next_id = max_id + 1
+
+    async def _persist_job(self, job: DownloadJob) -> None:
+        async with get_db() as db:
+            await db.execute(
+                """
+                INSERT OR REPLACE INTO download_jobs
+                (id, url, filename, provider, status, bytes_downloaded, total_bytes,
+                 created_at, updated_at, error_message, attempts, dest_path, temp_path,
+                 target_root, record_source)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    job.id,
+                    job.url,
+                    job.filename,
+                    job.provider,
+                    job.status,
+                    job.bytes_downloaded,
+                    job.total_bytes,
+                    job.created_at,
+                    job.updated_at,
+                    job.error_message,
+                    job.attempts,
+                    str(job.dest_path) if job.dest_path else None,
+                    str(job.temp_path) if job.temp_path else None,
+                    str(job.target_root) if job.target_root else None,
+                    1 if job.record_source else 0,
+                ),
+            )
+            await db.commit()
+
+    def _persist_job_sync(self, job: DownloadJob) -> None:
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            asyncio.run(self._persist_job(job))
+            return
+        loop.create_task(self._persist_job(job))
 
     def list_jobs(self) -> list[DownloadJob]:
         with self._lock:
@@ -136,6 +268,7 @@ class DownloadManager:
             job.cancelled = True
             job.status = "cancelled"
             job.updated_at = _now_iso()
+            self._persist_job_sync(job)
             return True
 
     def cancel_all(self) -> int:
@@ -147,6 +280,7 @@ class DownloadManager:
                 job.cancelled = True
                 job.status = "cancelled"
                 job.updated_at = _now_iso()
+                self._persist_job_sync(job)
                 count += 1
         return count
 
@@ -156,7 +290,6 @@ class DownloadManager:
         url: str,
         filename: str | None = None,
         provider: str | None = None,
-        api_key_override: str | None = None,
         start_now: bool = False,
         dest_dir: Path | None = None,
         target_root: Path | None = None,
@@ -188,10 +321,10 @@ class DownloadManager:
                 temp_path=temp_path,
                 target_root=target_root,
                 record_source=record_source,
-                api_key_override=api_key_override,
                 force_start=bool(start_now),
             )
             self._jobs[job_id] = job
+            self._persist_job_sync(job)
         if start_now:
             self.start_job(job_id, force=True)
         else:
@@ -211,6 +344,7 @@ class DownloadManager:
                 if len(self._active) >= max_concurrent:
                     job.status = "queued"
                     job.updated_at = _now_iso()
+                    self._persist_job_sync(job)
                     return False
             job.force_start = force
             self._start_job_locked(job)
@@ -220,6 +354,7 @@ class DownloadManager:
         job.status = "running"
         job.updated_at = _now_iso()
         self._active.add(job.id)
+        self._persist_job_sync(job)
         threading.Thread(target=self._run_job, args=(job.id,), daemon=True).start()
 
     def _scheduler_loop(self) -> None:
@@ -241,12 +376,12 @@ class DownloadManager:
 
     def _resolve_auth_header(self, job: DownloadJob) -> dict[str, str]:
         settings = get_settings()
-        token = job.api_key_override
-
         if job.provider == "civitai":
-            token = token or settings.civitai_api_key
+            token = settings.civitai_api_key
         elif job.provider == "huggingface":
-            token = token or settings.huggingface_api_key
+            token = settings.huggingface_api_key
+        else:
+            token = None
 
         if token:
             return {"Authorization": f"Bearer {token}"}
@@ -335,6 +470,7 @@ class DownloadManager:
                 job.updated_at = _now_iso()
                 job.status = "running"
                 job.error_message = None
+                self._persist_job_sync(job)
 
                 if not job.temp_path:
                     job.temp_path = job.dest_path.with_suffix(job.dest_path.suffix + ".part")
@@ -362,6 +498,7 @@ class DownloadManager:
                             job.status = "failed"
                             job.error_message = f"HTTP {resp.status_code}"
                             job.updated_at = _now_iso()
+                            self._persist_job_sync(job)
                             return
 
                         suggested_name = _parse_content_disposition(resp.headers.get("Content-Disposition", ""))
@@ -401,12 +538,17 @@ class DownloadManager:
                                 handle.write(chunk)
                                 job.bytes_downloaded += len(chunk)
                                 job.updated_at = _now_iso()
+                                now_ts = time.time()
+                                if now_ts - job.last_persist_ts > 1.0:
+                                    job.last_persist_ts = now_ts
+                                    self._persist_job_sync(job)
 
                         # Completed?
                         if job.total_bytes and job.bytes_downloaded >= job.total_bytes:
                             job.temp_path.replace(job.dest_path)
                             job.status = "completed"
                             job.updated_at = _now_iso()
+                            self._persist_job_sync(job)
                             self._post_complete(job)
                             return
 
@@ -415,6 +557,7 @@ class DownloadManager:
                             job.temp_path.replace(job.dest_path)
                             job.status = "completed"
                             job.updated_at = _now_iso()
+                            self._persist_job_sync(job)
                             self._post_complete(job)
                             return
 
@@ -426,6 +569,7 @@ class DownloadManager:
                     job.status = "failed"
                     job.error_message = str(exc)
                     job.updated_at = _now_iso()
+                    self._persist_job_sync(job)
                     return
 
                 # Retry after a brief pause
@@ -433,6 +577,7 @@ class DownloadManager:
 
             job.status = "cancelled"
             job.updated_at = _now_iso()
+            self._persist_job_sync(job)
         finally:
             with self._lock:
                 self._active.discard(job_id)

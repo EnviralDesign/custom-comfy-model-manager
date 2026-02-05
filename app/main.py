@@ -34,6 +34,23 @@ async def lifespan(app: FastAPI):
     # Initialize database
     await startup_db()
     print("✓ Database initialized")
+
+    # Reset any running tasks (server restarts leave them orphaned)
+    from app.database import get_db
+    async with get_db() as db:
+        cursor = await db.execute(
+            """
+            UPDATE queue
+            SET status = 'pending',
+                started_at = NULL,
+                bytes_transferred = 0,
+                error_message = NULL
+            WHERE status = 'running'
+            """
+        )
+        await db.commit()
+        if cursor.rowcount:
+            print(f"↺ Reset {cursor.rowcount} running queue task(s) to pending")
     
     # Start queue worker
     from app.services.worker import get_worker
@@ -44,6 +61,10 @@ async def lifespan(app: FastAPI):
     from app.services.ai_lookup_worker import get_ai_lookup_worker
     ai_worker = get_ai_lookup_worker()
     await ai_worker.start()
+
+    # Restore downloader jobs
+    from app.services.downloader import get_download_manager
+    await get_download_manager().load_persisted_jobs()
     
     yield
     

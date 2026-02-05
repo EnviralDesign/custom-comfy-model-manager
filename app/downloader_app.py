@@ -21,6 +21,14 @@ app = FastAPI(title="Comfy Downloader", version="0.1.0")
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 templates = Jinja2Templates(directory=TEMPLATES_DIR)
 
+@app.on_event("startup")
+async def startup():
+    from app.database import startup_db
+    from app.services.downloader import get_download_manager
+
+    await startup_db()
+    await get_download_manager().load_persisted_jobs()
+
 
 @app.get("/", response_class=HTMLResponse)
 async def downloader_page(request: Request):

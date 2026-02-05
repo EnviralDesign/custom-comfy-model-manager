@@ -163,6 +163,61 @@ def _resolve_safetensors_path(relpath: str, side: Literal["local", "lake", "auto
     return chosen_side, file_path
 
 
+async def _classify_safetensors_cached(relpath: str, side: Literal["local", "lake", "auto"], force: bool = False) -> dict:
+    chosen_side, file_path = _resolve_safetensors_path(relpath, side)
+    stat = file_path.stat()
+    cache_key = f"{chosen_side}:{relpath}"
+
+    if not force:
+        async with get_db() as db:
+            cursor = await db.execute(
+                "SELECT size, mtime_ns, payload_json FROM safetensors_cache WHERE key = ?",
+                (cache_key,),
+            )
+            row = await cursor.fetchone()
+            if row and row["size"] == stat.st_size and row["mtime_ns"] == stat.st_mtime_ns:
+                payload = json.loads(row["payload_json"])
+                return {
+                    "relpath": relpath,
+                    "side": chosen_side,
+                    **payload,
+                }
+
+    header = await run_in_threadpool(read_safetensors_header, file_path)
+    result = classify_safetensors_header(header, relpath=relpath)
+    payload = {
+        "tags": result.get("tags", []),
+        "confidence": result.get("confidence", 0.0),
+        "signals": result.get("signals", []),
+        "signals_by_tag": result.get("signals_by_tag", {}),
+    }
+
+    async with get_db() as db:
+        await db.execute(
+            """
+            INSERT OR REPLACE INTO safetensors_cache
+            (key, side, relpath, size, mtime_ns, payload_json, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                cache_key,
+                chosen_side,
+                relpath,
+                stat.st_size,
+                stat.st_mtime_ns,
+                json.dumps(payload),
+                datetime.now().isoformat(),
+            ),
+        )
+        await db.commit()
+
+    return {
+        "relpath": relpath,
+        "side": chosen_side,
+        **payload,
+    }
+
+
 @router.get("/safetensors/header")
 async def get_safetensors_header(
     relpath: str = Query(...),
@@ -196,64 +251,44 @@ async def classify_safetensors(
     """
     Classify a .safetensors file using header heuristics.
     """
-    chosen_side, file_path = _resolve_safetensors_path(relpath, side)
-
     try:
-        stat = file_path.stat()
-        cache_key = f"{chosen_side}:{relpath}"
-
-        if not force:
-            async with get_db() as db:
-                cursor = await db.execute(
-                    "SELECT size, mtime_ns, payload_json FROM safetensors_cache WHERE key = ?",
-                    (cache_key,),
-                )
-                row = await cursor.fetchone()
-                if row and row["size"] == stat.st_size and row["mtime_ns"] == stat.st_mtime_ns:
-                    payload = json.loads(row["payload_json"])
-                    return {
-                        "relpath": relpath,
-                        "side": chosen_side,
-                        **payload,
-                    }
-
-        header = await run_in_threadpool(read_safetensors_header, file_path)
-        result = classify_safetensors_header(header, relpath=relpath)
-        payload = {
-            "tags": result.get("tags", []),
-            "confidence": result.get("confidence", 0.0),
-            "signals": result.get("signals", []),
-            "signals_by_tag": result.get("signals_by_tag", {}),
-        }
-
-        async with get_db() as db:
-            await db.execute(
-                """
-                INSERT OR REPLACE INTO safetensors_cache
-                (key, side, relpath, size, mtime_ns, payload_json, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    cache_key,
-                    chosen_side,
-                    relpath,
-                    stat.st_size,
-                    stat.st_mtime_ns,
-                    json.dumps(payload),
-                    datetime.now().isoformat(),
-                ),
-            )
-            await db.commit()
+        payload = await _classify_safetensors_cached(relpath, side, force=force)
     except SafetensorsHeaderError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Failed to classify header: {exc}")
 
-    return {
-        "relpath": relpath,
-        "side": chosen_side,
-        **payload,
-    }
+    return payload
+
+
+class SafetensorsBatchItem(BaseModel):
+    relpath: str
+    side: Literal["local", "lake"]
+
+
+class SafetensorsBatchRequest(BaseModel):
+    items: list[SafetensorsBatchItem]
+
+
+@router.post("/safetensors/classify-batch")
+async def classify_safetensors_batch(request: SafetensorsBatchRequest):
+    results = []
+    for item in request.items:
+        relpath = item.relpath
+        side = item.side
+        try:
+            payload = await _classify_safetensors_cached(relpath, side, force=False)
+            results.append(payload)
+        except Exception as exc:
+            results.append(
+                {
+                    "relpath": relpath,
+                    "side": side,
+                    "status": "error",
+                    "error": str(exc),
+                }
+            )
+    return {"results": results}
 
 
 @router.post("/safetensors/reclassify")

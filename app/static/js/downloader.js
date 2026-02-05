@@ -3,7 +3,6 @@
 const jobsEl = document.getElementById("download-jobs");
 const urlEl = document.getElementById("download-url");
 const filenameEl = document.getElementById("download-filename");
-const apiKeyEl = document.getElementById("download-api-key");
 const providerEl = document.getElementById("download-provider");
 const startBtn = document.getElementById("download-start-btn");
 const startNowBtn = document.getElementById("download-start-now-btn");
@@ -134,7 +133,6 @@ async function refreshJobs() {
 async function startDownload() {
     const url = urlEl.value.trim();
     const filename = filenameEl.value.trim();
-    const apiKey = apiKeyEl.value.trim();
     const provider = providerEl.value;
 
     if (!url) return;
@@ -148,14 +146,12 @@ async function startDownload() {
                 url,
                 filename: filename || null,
                 provider,
-                api_key: apiKey || null,
                 start_now: false,
             }),
         });
         if (res.ok) {
             urlEl.value = "";
             filenameEl.value = "";
-            apiKeyEl.value = "";
             await refreshJobs();
         }
     } finally {
@@ -166,7 +162,6 @@ async function startDownload() {
 async function startDownloadNow() {
     const url = urlEl.value.trim();
     const filename = filenameEl.value.trim();
-    const apiKey = apiKeyEl.value.trim();
     const provider = providerEl.value;
 
     if (!url) return;
@@ -180,14 +175,12 @@ async function startDownloadNow() {
                 url,
                 filename: filename || null,
                 provider,
-                api_key: apiKey || null,
                 start_now: true,
             }),
         });
         if (res.ok) {
             urlEl.value = "";
             filenameEl.value = "";
-            apiKeyEl.value = "";
             await refreshJobs();
         }
     } finally {
