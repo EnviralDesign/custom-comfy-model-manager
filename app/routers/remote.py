@@ -129,3 +129,24 @@ async def enqueue_task(task: RemoteTaskCreate, label: str = ""):
     """Enqueue a task from the UI."""
     mgr = get_session_manager()
     return mgr.enqueue_task(task, label)
+
+@router.get("/tasks/{task_id}", response_model=RemoteTask)
+async def get_task(task_id: str):
+    """Get a specific task by id."""
+    mgr = get_session_manager()
+    task = mgr.get_task(task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+    return task
+
+@router.post("/tasks/{task_id}/cancel")
+async def cancel_task(task_id: str):
+    """Cancel a pending or running task from the UI."""
+    mgr = get_session_manager()
+    task = mgr.get_task(task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+    if task.status in ("completed", "failed", "cancelled"):
+        return {"status": "not_cancellable"}
+    mgr.cancel_task(task_id)
+    return {"status": "cancelled"}

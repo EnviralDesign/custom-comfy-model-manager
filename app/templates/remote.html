@@ -226,6 +226,12 @@
             background: rgba(239, 68, 68, 0.1);
         }
 
+        .step-status-pill.cancelled {
+            color: #f59e0b;
+            border-color: rgba(245, 158, 11, 0.4);
+            background: rgba(245, 158, 11, 0.1);
+        }
+
         .step-detail {
             margin-top: 6px;
             font-size: 12px;
@@ -521,6 +527,7 @@
                         </div>
                         <div class="text-xs text-secondary provision-help">Only checked bundles are queued in step 6.</div>
                         <button id="btn-provision-bundles" class="btn btn-primary action-btn">📥 Provision Selected Bundles</button>
+                        <button id="btn-cancel-provision" class="btn btn-danger action-btn">🛑 Cancel Provision Download</button>
                     </div>
                     <div class="step-status-pane">
                         <div class="step-row-header">

@@ -123,6 +123,9 @@ class RemoteSessionManager:
         """Update a task's status from the agent."""
         for t in self._tasks:
             if t.id == update.task_id:
+                # Ignore agent-side progress updates after a UI cancellation.
+                if t.status == "cancelled" and update.status != "cancelled":
+                    return
                 t.status = update.status
                 if update.progress is not None:
                     t.progress = update.progress
@@ -150,6 +153,25 @@ class RemoteSessionManager:
                 if update.status in ["completed", "failed", "cancelled"] and not t.completed_at:
                     t.completed_at = datetime.utcnow()
                 return
+
+    def get_task(self, task_id: str) -> Optional[RemoteTask]:
+        """Get a task by id."""
+        for t in self._tasks:
+            if t.id == task_id:
+                return t
+        return None
+
+    def cancel_task(self, task_id: str) -> bool:
+        """Cancel a pending or running task."""
+        task = self.get_task(task_id)
+        if not task:
+            return False
+        if task.status in ["completed", "failed", "cancelled"]:
+            return False
+        task.status = "cancelled"
+        task.message = "Cancelled by user."
+        task.completed_at = datetime.utcnow()
+        return True
 
     def get_tasks(self) -> List[RemoteTask]:
         """Get all tasks."""

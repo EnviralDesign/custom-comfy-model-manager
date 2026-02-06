@@ -143,6 +143,17 @@ def update_progress(task_id, status, progress=None, message=None, error=None, me
     except:
         pass
 
+def is_task_cancelled(task_id: str) -> bool:
+    try:
+        with _api_lock:
+            resp = api_session.get(f"{BASE_URL}/api/remote/tasks/{task_id}", timeout=10)
+        if resp.status_code != 200:
+            return False
+        data = resp.json() or {}
+        return data.get("status") == "cancelled"
+    except Exception:
+        return False
+
 # --- HELPERS ---
 
 def get_provider_from_url(url: str) -> str:
@@ -412,10 +423,12 @@ def handle_install_manager(task):
     else:
         update_progress(task['id'], "failed", 0.0, "ComfyUI-Manager install failed", error=err)
 
-def download_from_source(url, dest_path, task_id, existing_size=0, extra_headers=None, session=None):
+def download_from_source(url, dest_path, task_id, existing_size=0, extra_headers=None, session=None, should_cancel=None):
     sess = session or download_session
     attempt = 0
     while attempt < DOWNLOAD_MAX_RETRIES:
+        if should_cancel and should_cancel():
+            return False, "cancelled"
         attempt += 1
         headers = {}
         if extra_headers:
@@ -461,6 +474,8 @@ def download_from_source(url, dest_path, task_id, existing_size=0, extra_headers
                 with open(dest_path, mode) as f:
                     last_update = time.time()
                     for chunk in r.iter_content(chunk_size=CHUNK_SIZE):
+                        if should_cancel and should_cancel():
+                            return False, "cancelled"
                         if chunk:
                             f.write(chunk)
                             downloaded += len(chunk)
@@ -474,6 +489,8 @@ def download_from_source(url, dest_path, task_id, existing_size=0, extra_headers
 
                 return True, None
         except Exception as e:
+            if should_cancel and should_cancel():
+                return False, "cancelled"
             if attempt < DOWNLOAD_MAX_RETRIES:
                 wait_s = DOWNLOAD_RETRY_BACKOFF_SECONDS * attempt
                 log(f"Download error, retrying in {wait_s:.1f}s (attempt {attempt}/{DOWNLOAD_MAX_RETRIES}): {e}", error=True)
@@ -552,12 +569,22 @@ def handle_download(task):
             current_size = temp_dest.stat().st_size
 
         headers = auth_headers_for_source(provider, url)
-        ok, err = download_from_source(url, temp_dest, task['id'], current_size, extra_headers=headers)
+        ok, err = download_from_source(
+            url,
+            temp_dest,
+            task['id'],
+            current_size,
+            extra_headers=headers,
+            should_cancel=lambda: is_task_cancelled(task['id']),
+        )
         
         if ok:
             temp_dest.rename(final_dest)
             success = True
             break
+        elif err == "cancelled":
+            update_progress(task['id'], "cancelled", 0.0, "Cancelled by user.")
+            return
         else:
             log(f"Source failed: {err}", error=True)
             # Continue to next source
@@ -609,6 +636,15 @@ def handle_download_urls(task):
 
     lock = threading.Lock()
     done_count = [0]
+    cancel_event = threading.Event()
+
+    def should_cancel():
+        if cancel_event.is_set():
+            return True
+        if is_task_cancelled(task['id']):
+            cancel_event.set()
+            return True
+        return False
 
     def update_item(key, status, message=None, done_delta=0):
         with lock:
@@ -655,6 +691,8 @@ def handle_download_urls(task):
         session.headers.update({"User-Agent": USER_AGENT})
 
         for item in queue_items:
+            if should_cancel():
+                break
             relpath = item.get('relpath')
             url = item.get('url')
             item_key = item.get('key')
@@ -692,13 +730,17 @@ def handle_download_urls(task):
                 task['id'],
                 current_size,
                 extra_headers=headers,
-                session=session
+                session=session,
+                should_cancel=should_cancel,
             )
 
             if ok:
                 temp_dest.rename(dest_path)
                 log(f"Successfully downloaded {relpath}")
                 update_item(item_key, "completed", f"Completed: {relpath}", done_delta=1)
+            elif err == "cancelled":
+                cancel_event.set()
+                break
             else:
                 log(f"Failed to download {relpath}: {err}", error=True)
                 update_item(item_key, "failed", f"Failed: {relpath}", done_delta=1)
@@ -709,6 +751,12 @@ def handle_download_urls(task):
             futures = [executor.submit(worker, provider, items) for provider, items in active_queues]
             for f in futures:
                 f.result()
+
+    if should_cancel():
+        done = done_count[0]
+        progress = done / total_items if total_items else 1.0
+        update_progress(task['id'], "cancelled", progress, f"Cancelled by user. Processed {done}/{total_items} items.")
+        return
 
     failed = sum(1 for s in items_status.values() if s == "failed")
     skipped = sum(1 for s in items_status.values() if s == "skipped")

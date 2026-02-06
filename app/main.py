@@ -6,7 +6,7 @@ from pathlib import Path
 from fastapi import FastAPI, Request
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, RedirectResponse
 
 from app.config import get_settings
 from app.database import startup_db
@@ -130,9 +130,9 @@ async def filter_external_traffic(request: Request, call_next):
 # ============================================================================
 
 @app.get("/", response_class=HTMLResponse)
-async def index(request: Request):
-    """Redirect to sync page."""
-    return templates.TemplateResponse("index.html", {"request": request})
+async def index():
+    """Redirect home URL to the sync page."""
+    return RedirectResponse(url="/sync", status_code=307)
 
 
 @app.get("/sync", response_class=HTMLResponse)

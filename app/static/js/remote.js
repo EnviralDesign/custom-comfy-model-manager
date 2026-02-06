@@ -28,6 +28,7 @@ document.addEventListener('DOMContentLoaded', () => {
         stepDownloadItems: document.getElementById('step-download-items'),
         bundleList: document.getElementById('bundle-provision-list'),
         btnProvision: document.getElementById('btn-provision-bundles'),
+        btnCancelProvision: document.getElementById('btn-cancel-provision'),
         torchIndexDisplay: document.getElementById('torch-index-display')
     };
 
@@ -201,6 +202,41 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     }
 
+    function latestTaskByType(tasks, type) {
+        const matches = (tasks || []).filter(t => t.type === type);
+        if (matches.length === 0) return null;
+        matches.sort((a, b) => new Date(b.created_at || 0).getTime() - new Date(a.created_at || 0).getTime());
+        return matches[0];
+    }
+
+    async function cancelProvisionTask() {
+        if (!els.btnCancelProvision) return;
+        try {
+            const res = await fetch('/api/remote/tasks');
+            if (!res.ok) {
+                throw new Error(await extractErrorMessage(res, 'Failed to load tasks'));
+            }
+            const tasks = await res.json();
+            const latestProvision = latestTaskByType(tasks, 'DOWNLOAD_URLS');
+            if (!latestProvision) {
+                alert('No provision task found.');
+                return;
+            }
+            if (!['pending', 'running'].includes(latestProvision.status)) {
+                alert(`Latest provision task is ${latestProvision.status} and cannot be cancelled.`);
+                return;
+            }
+            const cancelRes = await fetch(`/api/remote/tasks/${latestProvision.id}/cancel`, { method: 'POST' });
+            if (!cancelRes.ok) {
+                throw new Error(await extractErrorMessage(cancelRes, 'Failed to cancel provision task'));
+            }
+            await fetchTasks();
+        } catch (e) {
+            console.error('Provision cancel failed', e);
+            alert('Failed to cancel provision task: ' + e.message);
+        }
+    }
+
     async function runAllSetup() {
         if (!remoteConfig.torch_index_url) {
             alert('Torch index URL is not configured.');
@@ -307,6 +343,9 @@ document.addEventListener('DOMContentLoaded', () => {
         if (els.stepDownloadItems) {
             els.stepDownloadItems.innerHTML = '';
         }
+        if (els.btnCancelProvision) {
+            els.btnCancelProvision.disabled = true;
+        }
     }
 
     function renderStepStatuses(tasks) {
@@ -355,6 +394,12 @@ document.addEventListener('DOMContentLoaded', () => {
                 els.stepDownloadItems.innerHTML = renderDownloadItems(t);
             }
         });
+
+        const latestProvision = latestTaskByType(tasks, 'DOWNLOAD_URLS');
+        if (els.btnCancelProvision) {
+            const canCancel = latestProvision && ['pending', 'running'].includes(latestProvision.status);
+            els.btnCancelProvision.disabled = !canCancel;
+        }
     }
 
     function renderDownloadItems(task) {
@@ -540,6 +585,7 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     if (els.btnProvision) els.btnProvision.addEventListener('click', provisionBundles);
+    if (els.btnCancelProvision) els.btnCancelProvision.addEventListener('click', cancelProvisionTask);
 
     // Initial load
     fetchStatus();
