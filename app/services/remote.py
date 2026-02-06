@@ -2,7 +2,7 @@
 
 import secrets
 from datetime import datetime, timedelta, timezone
-from typing import Optional, List, Dict
+from typing import Optional, List, Dict, Tuple
 import asyncio
 
 from app.config import get_settings
@@ -109,7 +109,10 @@ class RemoteSessionManager:
         """Enqueue a new task."""
         if not self.is_active:
             raise ValueError("No active session")
-            
+
+        if task_create.type == "DOWNLOAD_URLS":
+            return self._enqueue_or_merge_download_urls(task_create, label)
+
         task = RemoteTask(
             type=task_create.type, 
             payload=task_create.payload,
@@ -118,6 +121,95 @@ class RemoteSessionManager:
         self._tasks.append(task)
         self._task_event.set() # Wake up poller
         return task
+
+    def _make_task(self, task_create: RemoteTaskCreate, label: str = "") -> RemoteTask:
+        task = RemoteTask(
+            type=task_create.type,
+            payload=task_create.payload,
+            label=label or task_create.type,
+        )
+        self._tasks.append(task)
+        self._task_event.set()  # Wake up poller
+        return task
+
+    def _task_item_key(self, item: dict) -> Optional[str]:
+        if not isinstance(item, dict):
+            return None
+        relpath = item.get("relpath")
+        if relpath:
+            return f"relpath:{relpath}"
+        url = item.get("url")
+        if url:
+            return f"url:{url}"
+        return None
+
+    def _active_download_tasks(self) -> Tuple[List[RemoteTask], List[RemoteTask]]:
+        running = []
+        pending = []
+        for task in self._tasks:
+            if task.type != "DOWNLOAD_URLS":
+                continue
+            if task.status == "running":
+                running.append(task)
+            elif task.status == "pending":
+                pending.append(task)
+        return running, pending
+
+    def _enqueue_or_merge_download_urls(self, task_create: RemoteTaskCreate, label: str = "") -> RemoteTask:
+        payload = task_create.payload or {}
+        incoming_items = payload.get("items")
+        if not isinstance(incoming_items, list):
+            incoming_items = []
+
+        # Normalize and dedupe within incoming list first.
+        uniq_items: List[dict] = []
+        uniq_keys = set()
+        for item in incoming_items:
+            key = self._task_item_key(item)
+            if not key or key in uniq_keys:
+                continue
+            uniq_keys.add(key)
+            uniq_items.append(item)
+
+        running_tasks, pending_tasks = self._active_download_tasks()
+        existing_keys = set()
+        for task in [*running_tasks, *pending_tasks]:
+            for item in (task.payload or {}).get("items", []) or []:
+                key = self._task_item_key(item)
+                if key:
+                    existing_keys.add(key)
+
+        new_items = [item for item in uniq_items if self._task_item_key(item) not in existing_keys]
+        if not new_items:
+            if pending_tasks:
+                return pending_tasks[-1]
+            if running_tasks:
+                return running_tasks[-1]
+            task_create.payload = {"items": uniq_items}
+            return self._make_task(task_create, label)
+
+        # Prefer appending to an existing pending queue extension if present.
+        if pending_tasks:
+            target = pending_tasks[-1]
+            if not isinstance(target.payload, dict):
+                target.payload = {}
+            existing = target.payload.get("items")
+            if not isinstance(existing, list):
+                existing = []
+            existing.extend(new_items)
+            target.payload["items"] = existing
+            target.label = target.label or label or target.type
+            target.message = f"Queued {len(existing)} provision item(s)."
+            return target
+
+        # If a batch is currently running, enqueue a follow-up pending batch.
+        if running_tasks:
+            task_create.payload = {"items": new_items}
+            return self._make_task(task_create, label or "Provision Queue Extension")
+
+        # Fresh queue.
+        task_create.payload = {"items": new_items}
+        return self._make_task(task_create, label)
 
     def update_task_progress(self, update: TaskProgressUpdate):
         """Update a task's status from the agent."""

@@ -202,10 +202,19 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     }
 
-    function latestTaskByType(tasks, type) {
+    function activeTaskByType(tasks, type) {
         const matches = (tasks || []).filter(t => t.type === type);
         if (matches.length === 0) return null;
-        matches.sort((a, b) => new Date(b.created_at || 0).getTime() - new Date(a.created_at || 0).getTime());
+
+        const rank = { running: 3, pending: 2, failed: 1, completed: 1, cancelled: 1 };
+        matches.sort((a, b) => {
+            const ra = rank[a.status] || 0;
+            const rb = rank[b.status] || 0;
+            if (rb !== ra) return rb - ra;
+            const ta = new Date(a.created_at || 0).getTime();
+            const tb = new Date(b.created_at || 0).getTime();
+            return tb - ta;
+        });
         return matches[0];
     }
 
@@ -217,18 +226,20 @@ document.addEventListener('DOMContentLoaded', () => {
                 throw new Error(await extractErrorMessage(res, 'Failed to load tasks'));
             }
             const tasks = await res.json();
-            const latestProvision = latestTaskByType(tasks, 'DOWNLOAD_URLS');
-            if (!latestProvision) {
+            const activeProvisionTasks = (tasks || [])
+                .filter(t => t.type === 'DOWNLOAD_URLS' && ['pending', 'running'].includes(t.status))
+                .sort((a, b) => new Date(b.created_at || 0).getTime() - new Date(a.created_at || 0).getTime());
+
+            if (activeProvisionTasks.length === 0) {
                 alert('No provision task found.');
                 return;
             }
-            if (!['pending', 'running'].includes(latestProvision.status)) {
-                alert(`Latest provision task is ${latestProvision.status} and cannot be cancelled.`);
-                return;
-            }
-            const cancelRes = await fetch(`/api/remote/tasks/${latestProvision.id}/cancel`, { method: 'POST' });
-            if (!cancelRes.ok) {
-                throw new Error(await extractErrorMessage(cancelRes, 'Failed to cancel provision task'));
+
+            for (const task of activeProvisionTasks) {
+                const cancelRes = await fetch(`/api/remote/tasks/${task.id}/cancel`, { method: 'POST' });
+                if (!cancelRes.ok) {
+                    throw new Error(await extractErrorMessage(cancelRes, 'Failed to cancel provision task'));
+                }
             }
             await fetchTasks();
         } catch (e) {
@@ -354,22 +365,8 @@ document.addEventListener('DOMContentLoaded', () => {
             return;
         }
 
-        const latestByType = {};
-        tasks.forEach(t => {
-            const existing = latestByType[t.type];
-            if (!existing) {
-                latestByType[t.type] = t;
-                return;
-            }
-            const existingTime = new Date(existing.created_at || 0).getTime();
-            const newTime = new Date(t.created_at || 0).getTime();
-            if (newTime >= existingTime) {
-                latestByType[t.type] = t;
-            }
-        });
-
         stepTypes.forEach(type => {
-            const t = latestByType[type];
+            const t = activeTaskByType(tasks, type);
             const elsForStep = stepEls[type];
             if (!elsForStep.status || !elsForStep.detail || !elsForStep.error) return;
 
@@ -395,9 +392,8 @@ document.addEventListener('DOMContentLoaded', () => {
             }
         });
 
-        const latestProvision = latestTaskByType(tasks, 'DOWNLOAD_URLS');
         if (els.btnCancelProvision) {
-            const canCancel = latestProvision && ['pending', 'running'].includes(latestProvision.status);
+            const canCancel = (tasks || []).some(t => t.type === 'DOWNLOAD_URLS' && ['pending', 'running'].includes(t.status));
             els.btnCancelProvision.disabled = !canCancel;
         }
     }
