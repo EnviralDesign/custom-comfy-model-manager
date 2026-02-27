@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import re
 from typing import Optional
-from urllib.parse import unquote, urlparse
+from urllib.parse import unquote, unquote_to_bytes, urlparse
 
 import requests
 
@@ -13,18 +14,20 @@ from app.config import get_settings
 def _parse_content_disposition_filename(header_value: str | None) -> Optional[str]:
     if not header_value:
         return None
-    header = header_value.strip()
-    if "filename*=" in header:
-        parts = header.split("filename*=", 1)[1]
-        parts = parts.strip().strip(";")
-        if "''" in parts:
-            _, encoded = parts.split("''", 1)
-        else:
-            encoded = parts
-        return unquote(encoded.strip().strip('"'))
-    if "filename=" in header:
-        parts = header.split("filename=", 1)[1]
-        return parts.strip().strip(";").strip('"')
+    m_star = re.search(r"filename\*\s*=\s*(?:\"([^\"]*)\"|([^;]+))", header_value, flags=re.IGNORECASE)
+    if m_star:
+        value = (m_star.group(1) or m_star.group(2) or "").strip()
+        if "''" in value:
+            charset, encoded = value.split("''", 1)
+            try:
+                return unquote_to_bytes(encoded).decode(charset or "utf-8", errors="replace")
+            except Exception:
+                return unquote(encoded)
+        return unquote(value)
+
+    m_name = re.search(r"filename\s*=\s*(?:\"([^\"]*)\"|([^;]+))", header_value, flags=re.IGNORECASE)
+    if m_name:
+        return (m_name.group(1) or m_name.group(2) or "").strip()
     return None
 
 

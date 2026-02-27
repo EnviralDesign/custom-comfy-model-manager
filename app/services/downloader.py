@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+import re
 import threading
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
-from urllib.parse import unquote, urlparse
+from urllib.parse import unquote, unquote_to_bytes, urlparse
 
 import requests
 
@@ -23,8 +24,14 @@ def _now_iso() -> str:
 
 
 def _sanitize_filename(name: str) -> str:
-    invalid = '<>:"/\\|?*'
-    cleaned = "".join("_" if c in invalid else c for c in name).strip()
+    # Keep only the basename and drop accidental appended disposition params.
+    cleaned = (name or "").replace("\\", "/").rsplit("/", 1)[-1].strip().strip('"').strip("'")
+    cleaned = re.split(r";\s*filename\*?=", cleaned, maxsplit=1, flags=re.IGNORECASE)[0].strip()
+
+    # Windows-unfriendly chars + ';' to prevent parameter-like tails in filenames.
+    invalid = '<>:"/\\|?*;'
+    cleaned = "".join("_" if c in invalid or ord(c) < 32 else c for c in cleaned).strip()
+    cleaned = cleaned.rstrip(" .")
     return cleaned or "download.bin"
 
 
@@ -38,19 +45,21 @@ def _url_basename(url: str) -> str:
 def _parse_content_disposition(header_value: str) -> str | None:
     if not header_value:
         return None
-    header = header_value.strip()
-    # RFC 5987: filename*=UTF-8''...
-    if "filename*=" in header:
-        parts = header.split("filename*=", 1)[1]
-        parts = parts.strip().strip(";")
-        if "''" in parts:
-            _, encoded = parts.split("''", 1)
-        else:
-            encoded = parts
-        return unquote(encoded.strip().strip('"'))
-    if "filename=" in header:
-        parts = header.split("filename=", 1)[1]
-        return parts.strip().strip(";").strip('"')
+    # RFC 5987 / 6266 preferred field (capture quoted or unquoted token up to ';').
+    m_star = re.search(r"filename\*\s*=\s*(?:\"([^\"]*)\"|([^;]+))", header_value, flags=re.IGNORECASE)
+    if m_star:
+        value = (m_star.group(1) or m_star.group(2) or "").strip()
+        if "''" in value:
+            charset, encoded = value.split("''", 1)
+            try:
+                return unquote_to_bytes(encoded).decode(charset or "utf-8", errors="replace")
+            except Exception:
+                return unquote(encoded)
+        return unquote(value)
+
+    m_name = re.search(r"filename\s*=\s*(?:\"([^\"]*)\"|([^;]+))", header_value, flags=re.IGNORECASE)
+    if m_name:
+        return (m_name.group(1) or m_name.group(2) or "").strip()
     return None
 
 
