@@ -615,7 +615,7 @@ const Bundles = {
                 <div style="padding: 12px; border-bottom: 1px solid var(--border); display: flex; justify-content: space-between; gap: 12px;">
                     <div>
                         <div style="font-weight: 600;">${n.name || n.id}</div>
-                        <div style="font-family: var(--font-mono); font-size: 11px; color: var(--text-muted);">${n.id}${n.version ? ` @ ${n.version}` : ''}</div>
+                        <div style="font-family: var(--font-mono); font-size: 11px; color: var(--text-muted);">${n.install_type || 'registry'} · ${n.id}${n.version ? ` @ ${n.version}` : ''}</div>
                         <div style="font-size: 12px; color: var(--text-secondary); max-width: 620px;">${(n.description || '').slice(0, 180)}</div>
                     </div>
                     <button class="btn btn-small" onclick="Bundles.addRegistryCustomNode(${idx})">Add</button>
@@ -631,7 +631,7 @@ const Bundles = {
         if (!node) return;
         try {
             await App.api('POST', `/bundles/${encodeURIComponent(this.activeBundle.name)}/custom-nodes`, {
-                install_type: 'registry',
+                install_type: node.install_type || 'registry',
                 node_id: node.id,
                 name: node.name,
                 repository: node.repository || null,

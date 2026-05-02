@@ -148,6 +148,49 @@ async def search_registry_nodes(q: str, limit: int = 20):
     if not query:
         return {"nodes": []}
     limit = max(1, min(limit, 50))
+
+    def normalize(value: str | None) -> str:
+        return (value or "").lower().replace("-", "").replace("_", "").replace(" ", "")
+
+    def registry_item_to_node(item: dict) -> dict:
+        latest = item.get("latest_version") or {}
+        return {
+            "install_type": "registry",
+            "id": item.get("id"),
+            "name": item.get("name") or item.get("id"),
+            "description": item.get("description") or "",
+            "repository": item.get("repository") or "",
+            "version": latest.get("version"),
+            "downloads": item.get("downloads"),
+            "github_stars": item.get("github_stars"),
+        }
+
+    def score_node(node: dict) -> int:
+        needle = normalize(query)
+        haystacks = [
+            normalize(node.get("id")),
+            normalize(node.get("name")),
+            normalize(node.get("repository")),
+        ]
+        if any(h == needle for h in haystacks):
+            return 100
+        if any(needle in h for h in haystacks):
+            return 80
+        words = [normalize(part) for part in query.replace("-", " ").replace("_", " ").split() if part]
+        if words and all(any(word in h for h in haystacks) for word in words):
+            return 60
+        return 0
+
+    nodes = []
+
+    # Direct lookup is more reliable than the registry list search for exact package IDs.
+    try:
+        direct_resp = requests.get(f"https://api.comfy.org/nodes/{query}", timeout=20)
+        if direct_resp.status_code == 200:
+            nodes.append(registry_item_to_node(direct_resp.json()))
+    except Exception:
+        pass
+
     try:
         resp = requests.get(
             "https://api.comfy.org/nodes",
@@ -159,18 +202,47 @@ async def search_registry_nodes(q: str, limit: int = 20):
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"Registry search failed: {exc}") from exc
 
-    nodes = []
     for item in payload.get("nodes", []) or []:
-        latest = item.get("latest_version") or {}
-        nodes.append({
-            "id": item.get("id"),
-            "name": item.get("name") or item.get("id"),
-            "description": item.get("description") or "",
-            "repository": item.get("repository") or "",
-            "version": latest.get("version"),
-            "downloads": item.get("downloads"),
-            "github_stars": item.get("github_stars"),
-        })
+        node = registry_item_to_node(item)
+        if score_node(node) > 0:
+            nodes.append(node)
+
+    deduped = {}
+    for node in nodes:
+        if node.get("id"):
+            deduped[(node.get("install_type"), node.get("id"))] = node
+    nodes = sorted(deduped.values(), key=lambda n: (-score_node(n), n.get("name") or ""))
+
+    if len(nodes) < min(limit, 5):
+        try:
+            gh_resp = requests.get(
+                "https://api.github.com/search/repositories",
+                params={"q": f"{query} in:name,description ComfyUI", "per_page": min(limit, 10)},
+                timeout=20,
+            )
+            gh_resp.raise_for_status()
+            for repo in gh_resp.json().get("items", []) or []:
+                full_name = repo.get("full_name") or ""
+                html_url = repo.get("html_url") or ""
+                gh_node = {
+                    "install_type": "git",
+                    "id": html_url,
+                    "name": repo.get("name") or full_name,
+                    "description": repo.get("description") or "",
+                    "repository": html_url,
+                    "version": None,
+                    "downloads": None,
+                    "github_stars": repo.get("stargazers_count"),
+                }
+                if score_node(gh_node) > 0 and html_url:
+                    nodes.append(gh_node)
+        except Exception:
+            pass
+
+    nodes = sorted(
+        {((n.get("install_type") or "registry"), n.get("id")): n for n in nodes if n.get("id")}.values(),
+        key=lambda n: (-score_node(n), 0 if n.get("install_type") == "registry" else 1, n.get("name") or ""),
+    )
     return {"nodes": nodes}
 
 
