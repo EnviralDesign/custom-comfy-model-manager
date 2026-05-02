@@ -1,8 +1,11 @@
 """API Router for Bundle Management."""
 
 from typing import List, Optional
+from pathlib import Path
+import mimetypes
 import requests
 from fastapi import APIRouter, HTTPException, Request
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 from app.services.bundle_service import get_bundle_service, Bundle, ResolvedAsset, BundleCustomNode
@@ -36,6 +39,16 @@ class AddCustomNodeRequest(BaseModel):
     version: Optional[str] = None
 
 
+class LocalBundleFile(BaseModel):
+    root_type: str
+    relpath: str
+    name: str
+    folder: str
+    size: int
+    modified: float
+    is_image: bool = False
+
+
 class ResolveBundlesRequest(BaseModel):
     bundle_names: List[str]
 
@@ -56,6 +69,67 @@ async def list_bundles():
     service = get_bundle_service()
     bundles = await service.list_bundles()
     return BundleListResponse(bundles=bundles)
+
+
+def _bundle_root(root_type: str) -> Path:
+    settings = get_settings()
+    if root_type == "input":
+        return settings.get_local_input_root()
+    if root_type == "workflows":
+        return settings.get_local_workflows_root()
+    raise HTTPException(status_code=400, detail="root_type must be input or workflows")
+
+
+def _safe_local_path(root_type: str, relpath: str) -> tuple[Path, Path]:
+    root = _bundle_root(root_type).resolve()
+    if ".." in relpath or relpath.startswith("/") or "\\" in relpath:
+        raise HTTPException(status_code=400, detail="Invalid path")
+    path = (root / relpath).resolve()
+    try:
+        path.relative_to(root)
+    except ValueError as exc:
+        raise HTTPException(status_code=403, detail="Path traversal detected") from exc
+    return root, path
+
+
+@router.get("/bundles/local-files", response_model=List[LocalBundleFile])
+async def list_local_bundle_files(root_type: str, q: str = ""):
+    """List local ComfyUI input/workflow files that can be added to a bundle."""
+    root = _bundle_root(root_type)
+    if not root.exists():
+        return []
+
+    query = q.strip().lower()
+    files: List[LocalBundleFile] = []
+    for path in root.rglob("*"):
+        if not path.is_file():
+            continue
+        relpath = path.relative_to(root).as_posix()
+        if query and query not in relpath.lower():
+            continue
+        mime = mimetypes.guess_type(path.name)[0] or ""
+        stat = path.stat()
+        files.append(LocalBundleFile(
+            root_type=root_type,
+            relpath=relpath,
+            name=path.name,
+            folder=str(Path(relpath).parent).replace("\\", "/") if "/" in relpath else "",
+            size=stat.st_size,
+            modified=stat.st_mtime,
+            is_image=mime.startswith("image/"),
+        ))
+
+    files.sort(key=lambda f: (f.folder.lower(), f.name.lower()))
+    return files
+
+
+@router.get("/bundles/local-file")
+async def get_local_bundle_file(root_type: str, relpath: str):
+    """Serve a local input/workflow file for bundle UI previews."""
+    _, path = _safe_local_path(root_type, relpath)
+    if not path.exists() or not path.is_file():
+        raise HTTPException(status_code=404, detail="File not found")
+    return FileResponse(path)
 
 
 @router.post("/bundles", response_model=Bundle)

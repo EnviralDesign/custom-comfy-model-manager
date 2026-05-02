@@ -189,9 +189,22 @@ class RemoteSessionManager:
             task_create.payload = {"items": uniq_items}
             return self._make_task(task_create, label)
 
-        # Prefer appending to an existing pending queue extension if present.
+        target_root_type = (new_items[0].get("root_type") or "models") if new_items else "models"
+
+        # Prefer appending to an existing pending queue extension with the same target root.
         if pending_tasks:
-            target = pending_tasks[-1]
+            same_root_pending = []
+            for task in pending_tasks:
+                existing_items = (task.payload or {}).get("items", []) or []
+                first_root = (existing_items[0].get("root_type") or "models") if existing_items else "models"
+                if first_root == target_root_type:
+                    same_root_pending.append(task)
+
+            if not same_root_pending:
+                task_create.payload = {"items": new_items}
+                return self._make_task(task_create, label)
+
+            target = same_root_pending[-1]
             if not isinstance(target.payload, dict):
                 target.payload = {}
             existing = target.payload.get("items")

@@ -127,7 +127,7 @@ async def resolve_asset(
 @router.get("/assets/file", dependencies=[Depends(verify_remote_auth)])
 async def stream_file(
     request: Request,
-    side: str = Query(..., pattern="^(local|lake|input)$"),
+    side: str = Query(..., pattern="^(local|lake|input|workflows)$"),
     relpath: str = Query(...)
 ):
     """
@@ -144,6 +144,8 @@ async def stream_file(
         root = settings.local_models_root
     elif side == "input":
         root = settings.get_local_input_root()
+    elif side == "workflows":
+        root = settings.get_local_workflows_root()
     else:
         root = settings.lake_models_root
         

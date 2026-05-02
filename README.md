@@ -68,7 +68,9 @@ are not configured locally, the bootstrapper prompts for them as a fallback.
 Bundles are deployment recipes for rented GPU hosts and fresh ComfyUI installs.
 
 - Add model files from the **Sync** page. They deploy to `ComfyUI/models/...`.
-- Add workflow source files from **Bundles -> + Input File**. Paths are relative
+- Add workflows from **Bundles -> + Workflow**. Paths are relative to local
+  `ComfyUI/user/default/workflows` and deploy to the same remote workflow folder.
+- Add workflow source files from **Bundles -> + Input Files**. Paths are relative
   to local `ComfyUI/input` and deploy to remote `ComfyUI/input/...`.
 - Add custom node packs from **Bundles -> + Custom Node**. Registry installs use
   Comfy CLI so native ComfyUI Manager can recognize/manage them. Git URLs are
@@ -82,9 +84,10 @@ Remote flow:
    install requirements, and enable native ComfyUI Manager.
 4. Select bundles and click **Provision Selected Bundles**.
 
-Provisioning installs custom node packs first, then downloads bundled model and
-input files. Local model/input files are streamed through the manager using the
-session bearer token; public source URLs are used when available.
+Provisioning installs custom node packs first, then downloads workflows, input
+files, and finally heavier model files. Local model/input/workflow files are
+streamed through the manager using the session bearer token; public source URLs
+are used when available.
 
 ## Tech Stack
 

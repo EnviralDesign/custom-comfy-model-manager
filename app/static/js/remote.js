@@ -197,6 +197,11 @@ document.addEventListener('DOMContentLoaded', () => {
                 size_bytes: a.size,
                 provider: providerFromUrl(a.url)
             }));
+
+            const workflowItems = items.filter(item => item.root_type === 'workflows');
+            const inputItems = items.filter(item => item.root_type === 'input');
+            const modelItems = items.filter(item => !['workflows', 'input'].includes(item.root_type));
+
             if (items.length === 0) {
                 if (!data.custom_nodes || data.custom_nodes.length === 0) {
                     alert('No valid assets to provision after filtering.');
@@ -204,11 +209,25 @@ document.addEventListener('DOMContentLoaded', () => {
                 return;
             }
 
-            // 2. Enqueue the download task
+            // 2. Enqueue download tasks in dependency order: workflows, inputs, then heavy models.
             // Payload format for DOWNLOAD_URLS: { items: [ {root_type, relpath, url, hash, size_bytes}, ... ] }
-            await enqueueTask('DOWNLOAD_URLS', {
-                items
-            }, `Download ${selected.join(', ')}`);
+            if (workflowItems.length > 0) {
+                await enqueueTask('DOWNLOAD_URLS', {
+                    items: workflowItems
+                }, `Download workflows for ${selected.join(', ')}`);
+            }
+
+            if (inputItems.length > 0) {
+                await enqueueTask('DOWNLOAD_URLS', {
+                    items: inputItems
+                }, `Download input files for ${selected.join(', ')}`);
+            }
+
+            if (modelItems.length > 0) {
+                await enqueueTask('DOWNLOAD_URLS', {
+                    items: modelItems
+                }, `Download models for ${selected.join(', ')}`);
+            }
 
         } catch (e) {
             console.error('Provisioning failed', e);

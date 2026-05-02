@@ -49,7 +49,17 @@ class BundleService:
     """Manages bundles and their assets."""
 
     def _normalize_root_type(self, root_type: Optional[str]) -> str:
-        return "input" if root_type == "input" else "models"
+        if root_type in {"input", "workflows"}:
+            return root_type
+        return "models"
+
+    def _local_root_for_asset(self, root_type: str):
+        settings = get_settings()
+        if root_type == "input":
+            return settings.get_local_input_root()
+        if root_type == "workflows":
+            return settings.get_local_workflows_root()
+        return None
     
     async def list_bundles(self) -> List[Bundle]:
         """List all bundles with their asset counts."""
@@ -112,13 +122,25 @@ class BundleService:
             
             assets = await cursor.fetchall()
             for asset_row in assets:
+                root_type = asset_row["root_type"] or "models"
+                size = asset_row["size"]
+                local_root = self._local_root_for_asset(root_type)
+                if local_root is not None:
+                    local_path = (local_root / asset_row["relpath"]).resolve()
+                    try:
+                        local_path.relative_to(local_root.resolve())
+                    except ValueError:
+                        local_path = None
+                    if local_path and local_path.exists() and local_path.is_file():
+                        size = local_path.stat().st_size
+
                 bundle.assets.append(BundleAsset(
-                    root_type=asset_row["root_type"] or "models",
+                    root_type=root_type,
                     relpath=asset_row["relpath"],
                     hash=asset_row["hash"],
                     source_url_override=asset_row["source_url_override"],
                     source_url=asset_row["global_source_url"],
-                    size=asset_row["size"],
+                    size=size,
                 ))
 
             cursor = await db.execute("""
@@ -437,16 +459,15 @@ class BundleService:
         """Resolve a local or lake stream URL for an asset if indexed."""
         base_url = server_base_url.rstrip("/")
 
-        if asset.root_type == "input":
-            settings = get_settings()
-            input_root = settings.get_local_input_root()
-            input_path = (input_root / asset.relpath).resolve()
+        local_root = self._local_root_for_asset(asset.root_type)
+        if local_root is not None:
+            input_path = (local_root / asset.relpath).resolve()
             try:
-                input_path.relative_to(input_root.resolve())
+                input_path.relative_to(local_root.resolve())
             except ValueError:
                 return None
             if input_path.exists() and input_path.is_file():
-                return f"{base_url}/api/remote/assets/file?side=input&relpath={quote(asset.relpath, safe='')}"
+                return f"{base_url}/api/remote/assets/file?side={asset.root_type}&relpath={quote(asset.relpath, safe='')}"
             return None
 
         # Prefer local if present, else lake

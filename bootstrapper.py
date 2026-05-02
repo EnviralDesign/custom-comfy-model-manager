@@ -101,12 +101,14 @@ def ensure_comfy_dir(task_id=None) -> bool:
     return True
 
 def get_asset_destination(root_type: str, relpath: str) -> Path:
-    root = "input" if root_type == "input" else "models"
+    root = root_type if root_type in {"input", "workflows"} else "models"
     clean_path = Path(relpath)
     if clean_path.is_absolute() or ".." in clean_path.parts:
         raise ValueError(f"Unsafe asset path: {relpath}")
     if root == "input":
         return COMFY_DIR / "input" / clean_path
+    if root == "workflows":
+        return COMFY_DIR / "user" / "default" / "workflows" / clean_path
     return MODELS_DIR / clean_path
 
 # --- API WRAPPERS ---
@@ -478,6 +480,11 @@ def handle_install_manager(task):
         update_progress(task['id'], "failed", 0.0, "Native manager requirements install failed", error=err)
         return
 
+    rc, _, err = run_cmd([str(venv_python), "-c", "import cm_cli"], cwd=COMFY_DIR)
+    if rc != 0:
+        update_progress(task['id'], "failed", 0.0, "Native manager installed but cm_cli is not importable", error=err)
+        return
+
     legacy_dirs = [
         COMFY_DIR / "custom_nodes" / "comfyui-manager",
         COMFY_DIR / "custom_nodes" / "ComfyUI-Manager",
@@ -493,6 +500,35 @@ def handle_install_manager(task):
         msg = "Native manager enabled. Launch ComfyUI with --enable-manager."
 
     update_progress(task['id'], "completed", 1.0, msg)
+
+def ensure_official_manager_cli(task_id: str, progress: float = 0.0) -> bool:
+    """Ensure Comfy CLI and cm_cli are available for official registry node installs."""
+    venv_python = get_venv_python()
+    manager_requirements = COMFY_DIR / "manager_requirements.txt"
+    if not manager_requirements.exists():
+        update_progress(task_id, "failed", progress, "manager_requirements.txt not found; cannot use official Comfy node install.")
+        return False
+
+    rc, _, err = run_cmd([str(venv_python), "-m", "pip", "install", "-U", "comfy-cli"], cwd=COMFY_DIR)
+    if rc != 0:
+        update_progress(task_id, "failed", progress, "Failed to install comfy-cli", error=err)
+        return False
+
+    rc, _, err = run_cmd([str(venv_python), "-m", "pip", "install", "-r", "manager_requirements.txt"], cwd=COMFY_DIR)
+    if rc != 0:
+        update_progress(task_id, "failed", progress, "Failed to install manager_requirements.txt", error=err)
+        return False
+
+    rc, _, err = run_cmd([str(venv_python), "-c", "import cm_cli"], cwd=COMFY_DIR)
+    if rc != 0:
+        update_progress(task_id, "failed", progress, "cm_cli is not importable after manager requirements install", error=err)
+        return False
+
+    comfy_exe = get_venv_script("comfy")
+    if comfy_exe.exists():
+        run_cmd([str(comfy_exe), "--skip-prompt", "--workspace", str(COMFY_DIR), "manager", "enable-gui"], cwd=COMFY_DIR)
+
+    return True
 
 def safe_custom_node_dir_name(value: str) -> str:
     value = value.rstrip("/").split("/")[-1]
@@ -539,29 +575,25 @@ def handle_install_custom_nodes(task):
         update_progress(task["id"], "running", progress_base, f"Installing custom node {idx}/{total}: {name}")
 
         if install_type == "registry":
-            rc, _, pip_err = run_cmd([str(venv_python), "-m", "pip", "install", "-U", "comfy-cli"], cwd=COMFY_DIR)
-            if rc != 0:
-                update_progress(task["id"], "failed", progress_base, "Failed to install comfy-cli", error=pip_err)
+            if not ensure_official_manager_cli(task["id"], progress_base):
                 return
 
             comfy_exe = get_venv_script("comfy")
             if comfy_exe.exists():
-                rc, out, cli_err = run_cmd([str(comfy_exe), "--workspace", str(COMFY_DIR), "node", "install", node_id], cwd=COMFY_DIR)
+                rc, out, cli_err = run_cmd([str(comfy_exe), "--skip-prompt", "--workspace", str(COMFY_DIR), "node", "install", node_id], cwd=COMFY_DIR)
             else:
                 comfy_path = shutil.which("comfy")
                 if comfy_path:
-                    rc, out, cli_err = run_cmd([comfy_path, "--workspace", str(COMFY_DIR), "node", "install", node_id], cwd=COMFY_DIR)
+                    rc, out, cli_err = run_cmd([comfy_path, "--skip-prompt", "--workspace", str(COMFY_DIR), "node", "install", node_id], cwd=COMFY_DIR)
                 else:
                     rc, out, cli_err = 127, "", "comfy command not found after installing comfy-cli"
             if rc == 0:
                 update_progress(task["id"], "running", progress_done, f"Installed custom node: {name}")
                 continue
 
-            if not repo:
-                update_progress(task["id"], "failed", progress_base, f"Registry install failed: {name}", error=cli_err or out)
-                return
-
-            log(f"Registry install failed for {node_id}; falling back to git clone {repo}", error=True)
+            cli_output = f"{out}\n{cli_err}".strip()
+            update_progress(task["id"], "failed", progress_base, f"Official registry install failed: {name}", error=cli_output)
+            return
 
         git_url = repo or node_id
         if not git_url.startswith(("http://", "https://", "git@")):

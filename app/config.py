@@ -97,6 +97,10 @@ class Settings(BaseSettings):
         """Infer the local ComfyUI input directory from the configured models root."""
         return self.local_models_root.parent / "input"
 
+    def get_local_workflows_root(self) -> Path:
+        """Infer the local ComfyUI user workflow directory from the configured models root."""
+        return self.local_models_root.parent / "user" / "default" / "workflows"
+
 
 @lru_cache
 def get_settings() -> Settings:

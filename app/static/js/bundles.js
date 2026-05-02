@@ -7,6 +7,7 @@ const Bundles = {
     activeBundle: null,
     activeSourceContext: null,
     customNodeSearchResults: [],
+    localAssetBrowser: { rootType: 'input', files: [] },
 
     async init() {
         this.bindEvents();
@@ -84,7 +85,8 @@ const Bundles = {
                     <p style="color: var(--text-secondary); max-width: 600px;">${b.description || 'No description'}</p>
                 </div>
                 <div style="display: flex; gap: 8px;">
-                    <button class="btn" onclick="Bundles.openInputAssetModal()">+ Input File</button>
+                    <button class="btn" onclick="Bundles.openWorkflowAssetModal()">+ Workflow</button>
+                    <button class="btn" onclick="Bundles.openInputAssetModal()">+ Input Files</button>
                     <button class="btn" onclick="Bundles.openCustomNodeModal()">+ Custom Node</button>
                     <button class="btn" onclick="Bundles.openModal(true)">Edit</button>
                     <button class="btn btn-danger" onclick="Bundles.deleteBundle('${b.name}')">Delete Bundle</button>
@@ -108,7 +110,10 @@ const Bundles = {
             return `<div style="padding: 32px; text-align: center; border: 1px dashed var(--border); border-radius: var(--radius-md); color: var(--text-muted);">
                 No assets in this bundle.<br>
                 Go to <a href="/sync">Sync</a> to add model files, or add source files used by workflows here.<br>
-                <button class="btn btn-primary" style="margin-top: 16px;" onclick="Bundles.openInputAssetModal()">+ Input File</button>
+                <div style="display: flex; gap: 8px; justify-content: center; margin-top: 16px;">
+                    <button class="btn btn-primary" onclick="Bundles.openWorkflowAssetModal()">+ Workflow</button>
+                    <button class="btn btn-primary" onclick="Bundles.openInputAssetModal()">+ Input Files</button>
+                </div>
             </div>`;
         }
 
@@ -149,7 +154,7 @@ const Bundles = {
                     <tr>
                         <td title="${a.relpath}">
                             <div style="display: flex; align-items: center; gap: 8px;">
-                                <span class="source-badge ${rootType === 'input' ? 'web' : 'local'}">${this.formatRootType(rootType)}</span>
+                                <span class="source-badge ${rootType === 'models' ? 'local' : 'web'}">${this.formatRootType(rootType)}</span>
                                 <span style="font-family: var(--font-mono); font-size: 13px;">${a.relpath}</span>
                             </div>
                             ${a.hash ? `<div style="font-size: 11px; color: var(--text-muted);">Hash: ${a.hash.slice(0, 12)}...</div>` : ''}
@@ -239,7 +244,9 @@ const Bundles = {
     },
 
     formatRootType(rootType) {
-        return rootType === 'input' ? 'input' : 'models';
+        if (rootType === 'input') return 'input';
+        if (rootType === 'workflows') return 'workflow';
+        return 'models';
     },
 
     async testUrl(url, btn) {
@@ -316,8 +323,8 @@ const Bundles = {
             hashHint.textContent = '⚠️ File not yet hashed. URL will be saved by path and a hash will be queued.';
             hashHint.style.color = 'var(--warning)';
             hashHint.style.marginTop = '8px';
-        } else if (rootType === 'input') {
-            hashHint.textContent = 'Input files stream from your local ComfyUI/input folder. A URL is only a fallback.';
+        } else if (rootType === 'input' || rootType === 'workflows') {
+            hashHint.textContent = `${this.formatRootType(rootType)} files stream from your local ComfyUI folder. A URL is only a fallback.`;
             hashHint.style.color = 'var(--text-muted)';
             hashHint.style.marginTop = '8px';
         } else {
@@ -400,9 +407,9 @@ const Bundles = {
         }
 
         try {
-            if (ctx.rootType === 'input') {
+            if (ctx.rootType === 'input' || ctx.rootType === 'workflows') {
                 await App.api('POST', `/bundles/${encodeURIComponent(this.activeBundle.name)}/assets`, {
-                    root_type: 'input',
+                    root_type: ctx.rootType,
                     relpath: ctx.relpath,
                     hash: ctx.hash || null,
                     source_url_override: url,
@@ -436,9 +443,9 @@ const Bundles = {
         if (!confirm('Remove the source URL for this file?')) return;
 
         try {
-            if (ctx.rootType === 'input') {
+            if (ctx.rootType === 'input' || ctx.rootType === 'workflows') {
                 await App.api('POST', `/bundles/${encodeURIComponent(this.activeBundle.name)}/assets`, {
-                    root_type: 'input',
+                    root_type: ctx.rootType,
                     relpath: ctx.relpath,
                     hash: ctx.hash || null,
                     source_url_override: null,
@@ -470,72 +477,192 @@ const Bundles = {
         this.activeSourceContext = null;
     },
 
-    // ==================== Input Asset Modal ====================
+    // ==================== Local Asset Browser ====================
 
     openInputAssetModal() {
-        let modal = document.getElementById('bundle-input-asset-modal');
+        this.openLocalAssetModal('input');
+    },
+
+    openWorkflowAssetModal() {
+        this.openLocalAssetModal('workflows');
+    },
+
+    async openLocalAssetModal(rootType) {
+        this.localAssetBrowser = { rootType, files: [] };
+        let modal = document.getElementById('bundle-local-asset-modal');
         if (!modal) {
             modal = document.createElement('div');
-            modal.id = 'bundle-input-asset-modal';
+            modal.id = 'bundle-local-asset-modal';
             modal.className = 'modal-overlay';
             modal.innerHTML = `
-                <div class="modal-content">
+                <div class="modal-content bundle-file-browser-modal">
                     <div class="modal-header">
-                        <h3>Add Input File</h3>
-                        <button class="modal-close" onclick="Bundles.closeInputAssetModal()">×</button>
+                        <h3 class="bundle-local-title">Add Files</h3>
+                        <button class="modal-close" onclick="Bundles.closeLocalAssetModal()">×</button>
                     </div>
                     <div class="modal-body">
-                        <label for="bundle-input-relpath">Input-relative path:</label>
-                        <input type="text" id="bundle-input-relpath" class="modal-input" placeholder="3D/example.glb" />
-                        <label for="bundle-input-url">Optional fallback Web URL:</label>
-                        <input type="url" id="bundle-input-url" class="modal-input" placeholder="https://example.com/source-file.png" />
-                        <p class="modal-hint">This streams from your local ComfyUI/input folder through the bootstrapper and deploys to ComfyUI/input/&lt;path&gt; on the remote machine. A URL is only needed as a fallback.</p>
+                        <div class="bundle-file-toolbar">
+                            <input type="search" id="bundle-local-filter" class="modal-input" placeholder="Filter files..." />
+                            <button class="btn" onclick="Bundles.loadLocalAssetFiles()">Refresh</button>
+                        </div>
+                        <div class="bundle-file-browser-help"></div>
+                        <div id="bundle-local-file-list" class="bundle-file-list"></div>
+                        <div class="bundle-file-footer-note">
+                            <span id="bundle-local-selected-count">0 selected</span>
+                            <button class="btn btn-small" onclick="Bundles.toggleAllVisibleLocalAssets(true)">Select visible</button>
+                            <button class="btn btn-small" onclick="Bundles.toggleAllVisibleLocalAssets(false)">Clear visible</button>
+                        </div>
                     </div>
                     <div class="modal-footer">
-                        <button class="btn" onclick="Bundles.closeInputAssetModal()">Cancel</button>
-                        <button class="btn btn-primary" onclick="Bundles.saveInputAsset()">Add Input File</button>
+                        <button class="btn" onclick="Bundles.closeLocalAssetModal()">Cancel</button>
+                        <button class="btn btn-primary" onclick="Bundles.saveSelectedLocalAssets()">Add Selected</button>
                     </div>
                 </div>
             `;
             document.body.appendChild(modal);
 
             modal.addEventListener('click', (e) => {
-                if (e.target === modal) this.closeInputAssetModal();
+                if (e.target === modal) this.closeLocalAssetModal();
+            });
+            modal.querySelector('#bundle-local-filter').addEventListener('input', () => {
+                this.renderLocalAssetFiles();
             });
         }
 
-        modal.querySelector('#bundle-input-relpath').value = '';
-        modal.querySelector('#bundle-input-url').value = '';
+        const title = rootType === 'workflows' ? 'Add Workflows' : 'Add Input Files';
+        modal.querySelector('.bundle-local-title').textContent = title;
+        modal.querySelector('#bundle-local-filter').value = '';
+        modal.querySelector('.bundle-file-browser-help').textContent = rootType === 'workflows'
+            ? 'Select workflow JSON files from local ComfyUI/user/default/workflows. They deploy to the same path on the remote machine.'
+            : 'Select source files from local ComfyUI/input. Images show thumbnails; other files use a simple file icon.';
+        modal.querySelector('#bundle-local-file-list').innerHTML = '<div class="bundle-file-empty">Loading files...</div>';
+        modal.querySelector('#bundle-local-selected-count').textContent = '0 selected';
         modal.classList.add('visible');
-        modal.querySelector('#bundle-input-relpath').focus();
+        await this.loadLocalAssetFiles();
     },
 
-    closeInputAssetModal() {
-        const modal = document.getElementById('bundle-input-asset-modal');
+    closeLocalAssetModal() {
+        const modal = document.getElementById('bundle-local-asset-modal');
         if (modal) {
             modal.classList.remove('visible');
         }
     },
 
-    async saveInputAsset() {
-        const relpath = document.getElementById('bundle-input-relpath').value.trim().replaceAll('\\', '/');
-        const url = document.getElementById('bundle-input-url').value.trim();
+    async loadLocalAssetFiles() {
+        const rootType = this.localAssetBrowser.rootType;
+        const filter = document.getElementById('bundle-local-filter')?.value?.trim() || '';
+        const list = document.getElementById('bundle-local-file-list');
+        if (list) list.innerHTML = '<div class="bundle-file-empty">Loading files...</div>';
 
-        if (!relpath) {
-            alert('Input-relative path is required');
+        try {
+            const files = await App.api('GET', `/bundles/local-files?root_type=${encodeURIComponent(rootType)}&q=${encodeURIComponent(filter)}`);
+            this.localAssetBrowser.files = files || [];
+            this.renderLocalAssetFiles();
+        } catch (err) {
+            if (list) list.innerHTML = `<div class="bundle-file-empty error">Failed to load files: ${err.message}</div>`;
+        }
+    },
+
+    renderLocalAssetFiles() {
+        const rootType = this.localAssetBrowser.rootType;
+        const files = this.localAssetBrowser.files || [];
+        const filter = (document.getElementById('bundle-local-filter')?.value || '').trim().toLowerCase();
+        const list = document.getElementById('bundle-local-file-list');
+        if (!list) return;
+
+        const visible = files.filter(file => !filter || file.relpath.toLowerCase().includes(filter));
+        if (visible.length === 0) {
+            list.innerHTML = '<div class="bundle-file-empty">No files found.</div>';
+            this.updateLocalAssetSelectedCount();
             return;
         }
-        if (relpath.startsWith('/') || relpath.includes('..')) {
-            alert('Use a safe relative path inside the ComfyUI input folder.');
+
+        let currentFolder = null;
+        const rows = [];
+        for (const file of visible) {
+            const folder = file.folder || 'root';
+            if (folder !== currentFolder) {
+                currentFolder = folder;
+                const depth = folder === 'root' ? 0 : folder.split('/').length - 1;
+                rows.push(`
+                    <div class="bundle-file-folder" style="padding-left: ${depth * 14 + 10}px;">
+                        ${folder}
+                    </div>
+                `);
+            }
+
+            const depth = file.relpath.includes('/') ? file.relpath.split('/').length - 1 : 0;
+            const alreadyInBundle = (this.activeBundle?.assets || []).some(a => (a.root_type || 'models') === rootType && a.relpath === file.relpath);
+            const preview = file.is_image
+                ? `<img class="bundle-file-thumb" src="/api/bundles/local-file?root_type=${encodeURIComponent(rootType)}&relpath=${encodeURIComponent(file.relpath)}" loading="lazy" />`
+                : `<div class="bundle-file-icon">${rootType === 'workflows' ? 'JSON' : 'FILE'}</div>`;
+
+            rows.push(`
+                <label class="bundle-file-row ${alreadyInBundle ? 'already-added' : ''}" style="padding-left: ${depth * 14 + 12}px;">
+                    <input type="checkbox" class="bundle-local-checkbox" value="${file.relpath}" ${alreadyInBundle ? 'checked' : ''} onchange="Bundles.updateLocalAssetSelectedCount()" />
+                    ${preview}
+                    <span class="bundle-file-main">
+                        <span class="bundle-file-name">${file.name}</span>
+                        <span class="bundle-file-path">${file.relpath}</span>
+                    </span>
+                    <span class="bundle-file-size">${App.formatBytes(file.size || 0)}</span>
+                </label>
+            `);
+        }
+
+        list.innerHTML = rows.join('');
+        this.updateLocalAssetSelectedCount();
+    },
+
+    updateLocalAssetSelectedCount() {
+        const count = document.querySelectorAll('#bundle-local-file-list .bundle-local-checkbox:checked').length;
+        const el = document.getElementById('bundle-local-selected-count');
+        if (el) el.textContent = `${count} selected`;
+    },
+
+    toggleAllVisibleLocalAssets(checked) {
+        document.querySelectorAll('#bundle-local-file-list .bundle-local-checkbox').forEach(cb => {
+            cb.checked = checked;
+        });
+        this.updateLocalAssetSelectedCount();
+    },
+
+    async saveSelectedLocalAssets() {
+        const rootType = this.localAssetBrowser.rootType;
+        const selected = Array.from(document.querySelectorAll('#bundle-local-file-list .bundle-local-checkbox:checked'))
+            .map(cb => cb.value);
+
+        if (selected.length === 0) {
+            alert('Select at least one file.');
             return;
         }
+
+        try {
+            for (const relpath of selected) {
+                await App.api('POST', `/bundles/${encodeURIComponent(this.activeBundle.name)}/assets`, {
+                    root_type: rootType,
+                    relpath,
+                    source_url_override: null,
+                });
+            }
+            this.closeLocalAssetModal();
+            await this.selectBundle(this.activeBundle.name);
+        } catch (err) {
+            alert('Failed to add files: ' + err.message);
+        }
+    },
+
+    async saveInputAsset() {
+        // Kept for compatibility with old cached pages.
+        const relpath = document.getElementById('bundle-input-relpath')?.value?.trim().replaceAll('\\', '/') || '';
+        if (!relpath) return;
         try {
             await App.api('POST', `/bundles/${encodeURIComponent(this.activeBundle.name)}/assets`, {
                 root_type: 'input',
                 relpath,
-                source_url_override: url || null,
+                source_url_override: null,
             });
-            this.closeInputAssetModal();
+            this.closeLocalAssetModal();
             await this.selectBundle(this.activeBundle.name);
         } catch (err) {
             alert('Failed to add input file: ' + err.message);
