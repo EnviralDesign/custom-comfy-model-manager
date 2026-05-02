@@ -36,6 +36,11 @@ class AgentRegisterRequest(BaseModel):
     details: Optional[dict] = {}
 
 
+class RemoteSecretsResponse(BaseModel):
+    huggingface_api_key: Optional[str] = None
+    civitai_api_key: Optional[str] = None
+
+
 # --- Endpoints ---
 
 @router.get("/status", response_model=SessionStatusResponse)
@@ -97,6 +102,16 @@ async def agent_heartbeat():
     mgr = get_session_manager()
     mgr.heartbeat()
     return {"status": "ok"}
+
+
+@router.get("/agent/secrets", response_model=RemoteSecretsResponse, dependencies=[Depends(verify_remote_auth)])
+async def get_agent_secrets():
+    """Return optional provider keys to an authenticated remote bootstrapper."""
+    settings = get_settings()
+    return RemoteSecretsResponse(
+        huggingface_api_key=settings.huggingface_api_key,
+        civitai_api_key=settings.civitai_api_key,
+    )
 
 
 # --- Task Endpoints (Agent) ---

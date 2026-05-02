@@ -44,9 +44,12 @@ document.addEventListener('DOMContentLoaded', () => {
         'CREATE_VENV',
         'PIP_INSTALL_TORCH',
         'PIP_INSTALL_REQUIREMENTS',
-        'INSTALL_COMFYUI_MANAGER',
+        'ENABLE_NATIVE_MANAGER',
         'DOWNLOAD_URLS'
     ];
+    const stepAliases = {
+        ENABLE_NATIVE_MANAGER: ['ENABLE_NATIVE_MANAGER', 'INSTALL_COMFYUI_MANAGER']
+    };
     const stepEls = {};
     stepTypes.forEach(type => {
         stepEls[type] = {
@@ -166,17 +169,28 @@ document.addEventListener('DOMContentLoaded', () => {
             const data = await res.json();
 
             if (!data.assets || data.assets.length === 0) {
-                alert('Selected bundles contain no valid assets/URLs.');
-                return;
+                if (!data.custom_nodes || data.custom_nodes.length === 0) {
+                    alert('Selected bundles contain no valid assets/URLs or custom nodes.');
+                    return;
+                }
             }
 
-            // Deduplicate by relpath and skip malformed entries
+            if (data.custom_nodes && data.custom_nodes.length > 0) {
+                await enqueueTask('INSTALL_CUSTOM_NODES', {
+                    nodes: data.custom_nodes
+                }, `Install custom nodes for ${selected.join(', ')}`);
+            }
+
+            // Deduplicate by target root + relpath and skip malformed entries
             const uniq = new Map();
             data.assets.forEach(a => {
                 if (!a || !a.relpath || !a.url) return;
-                if (!uniq.has(a.relpath)) uniq.set(a.relpath, a);
+                const rootType = a.root_type || 'models';
+                const key = `${rootType}:${a.relpath}`;
+                if (!uniq.has(key)) uniq.set(key, a);
             });
             const items = Array.from(uniq.values()).map(a => ({
+                root_type: a.root_type || 'models',
                 relpath: a.relpath,
                 url: a.url,
                 hash: a.hash,
@@ -184,12 +198,14 @@ document.addEventListener('DOMContentLoaded', () => {
                 provider: providerFromUrl(a.url)
             }));
             if (items.length === 0) {
-                alert('No valid assets to provision after filtering.');
+                if (!data.custom_nodes || data.custom_nodes.length === 0) {
+                    alert('No valid assets to provision after filtering.');
+                }
                 return;
             }
 
             // 2. Enqueue the download task
-            // Payload format for DOWNLOAD_URLS: { items: [ {relpath, url, hash, size_bytes}, ... ] }
+            // Payload format for DOWNLOAD_URLS: { items: [ {root_type, relpath, url, hash, size_bytes}, ... ] }
             await enqueueTask('DOWNLOAD_URLS', {
                 items
             }, `Download ${selected.join(', ')}`);
@@ -203,7 +219,8 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     function activeTaskByType(tasks, type) {
-        const matches = (tasks || []).filter(t => t.type === type);
+        const acceptedTypes = stepAliases[type] || [type];
+        const matches = (tasks || []).filter(t => acceptedTypes.includes(t.type));
         if (matches.length === 0) return null;
 
         const rank = { running: 3, pending: 2, failed: 1, completed: 1, cancelled: 1 };
@@ -264,7 +281,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 index_flag: remoteConfig.torch_index_flag
             }, 'Install PyTorch (index URL)');
             await enqueueTask('PIP_INSTALL_REQUIREMENTS', {}, 'Install ComfyUI Requirements');
-            await enqueueTask('INSTALL_COMFYUI_MANAGER', {}, 'Install ComfyUI Manager');
+            await enqueueTask('ENABLE_NATIVE_MANAGER', {}, 'Enable Native ComfyUI Manager');
         } catch (e) {
             console.error('Run all enqueue failed', e);
             alert('Failed to queue full setup: ' + e.message);
@@ -408,7 +425,9 @@ document.addEventListener('DOMContentLoaded', () => {
 
         const rows = items.map(item => {
             const relpath = item.relpath || item.url || 'unknown';
-            const status = statusMap[relpath] || statusMap[item.url] || 'pending';
+            const rootType = item.root_type || 'models';
+            const itemKey = item.relpath ? `${rootType}:${item.relpath}` : item.url;
+            const status = statusMap[itemKey] || statusMap[relpath] || statusMap[item.url] || 'pending';
             const provider = (item.provider || providerFromUrl(item.url) || 'web').toLowerCase();
             if (status === 'completed' || status === 'failed' || status === 'skipped') {
                 doneCount += 1;
@@ -427,7 +446,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
             return `
             <div class="download-item">
-                <div class="download-item-path" title="${relpath}">${relpath}</div>
+                <div class="download-item-path" title="${rootType}/${relpath}">${rootType}/${relpath}</div>
                 <div style="display:flex; align-items:center; gap:6px;">
                     <span class="source-badge ${providerClassFor(provider)}">${providerLabel}</span>
                     <span class="download-item-status ${statusClass}">${status}</span>
@@ -572,7 +591,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     if (els.btnInstallManager) {
         els.btnInstallManager.addEventListener('click', () => {
-            enqueueTask('INSTALL_COMFYUI_MANAGER', {}, 'Install ComfyUI Manager');
+            enqueueTask('ENABLE_NATIVE_MANAGER', {}, 'Enable Native ComfyUI Manager');
         });
     }
 

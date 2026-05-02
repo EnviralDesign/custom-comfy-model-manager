@@ -1,10 +1,11 @@
 """API Router for Bundle Management."""
 
 from typing import List, Optional
+import requests
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
-from app.services.bundle_service import get_bundle_service, Bundle, BundleAsset, ResolvedAsset
+from app.services.bundle_service import get_bundle_service, Bundle, ResolvedAsset, BundleCustomNode
 from app.config import get_settings
 
 router = APIRouter()
@@ -21,9 +22,18 @@ class UpdateBundleRequest(BaseModel):
 
 
 class AddAssetRequest(BaseModel):
+    root_type: str = "models"
     relpath: str
     hash: Optional[str] = None
     source_url_override: Optional[str] = None
+
+
+class AddCustomNodeRequest(BaseModel):
+    install_type: str = "registry"
+    node_id: str
+    name: Optional[str] = None
+    repository: Optional[str] = None
+    version: Optional[str] = None
 
 
 class ResolveBundlesRequest(BaseModel):
@@ -36,6 +46,7 @@ class BundleListResponse(BaseModel):
 
 class ResolvedBundleResponse(BaseModel):
     assets: List[ResolvedAsset]
+    custom_nodes: List[BundleCustomNode] = []
     total_size: Optional[int] = None
 
 
@@ -104,29 +115,92 @@ async def add_asset(name: str, request: AddAssetRequest):
         name, 
         request.relpath.strip(), 
         request.hash, 
-        request.source_url_override
+        request.source_url_override,
+        request.root_type,
     )
     if not success:
         raise HTTPException(status_code=404, detail="Bundle not found")
-    return {"status": "added", "relpath": request.relpath}
+    return {"status": "added", "root_type": request.root_type, "relpath": request.relpath}
 
 
 @router.post("/bundles/{name}/assets/folder")
-async def add_folder_assets(name: str, folder_path: str):
+async def add_folder_assets(name: str, folder_path: str, root_type: str = "models"):
     """Add all assets in a folder to a bundle."""
     service = get_bundle_service()
-    count = await service.add_folder(name, folder_path)
+    count = await service.add_folder(name, folder_path, root_type)
     return {"status": "added", "count": count}
 
 
 @router.delete("/bundles/{name}/assets/{relpath:path}")
-async def remove_asset(name: str, relpath: str):
+async def remove_asset(name: str, relpath: str, root_type: str = "models"):
     """Remove an asset from a bundle."""
     service = get_bundle_service()
-    success = await service.remove_asset(name, relpath)
+    success = await service.remove_asset(name, relpath, root_type)
     if not success:
         raise HTTPException(status_code=404, detail="Bundle or asset not found")
-    return {"status": "removed", "relpath": relpath}
+    return {"status": "removed", "root_type": root_type, "relpath": relpath}
+
+
+@router.get("/bundles/registry/search")
+async def search_registry_nodes(q: str, limit: int = 20):
+    """Search the official Comfy Registry for custom node packs."""
+    query = q.strip()
+    if not query:
+        return {"nodes": []}
+    limit = max(1, min(limit, 50))
+    try:
+        resp = requests.get(
+            "https://api.comfy.org/nodes",
+            params={"search": query, "limit": limit},
+            timeout=20,
+        )
+        resp.raise_for_status()
+        payload = resp.json()
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Registry search failed: {exc}") from exc
+
+    nodes = []
+    for item in payload.get("nodes", []) or []:
+        latest = item.get("latest_version") or {}
+        nodes.append({
+            "id": item.get("id"),
+            "name": item.get("name") or item.get("id"),
+            "description": item.get("description") or "",
+            "repository": item.get("repository") or "",
+            "version": latest.get("version"),
+            "downloads": item.get("downloads"),
+            "github_stars": item.get("github_stars"),
+        })
+    return {"nodes": nodes}
+
+
+@router.post("/bundles/{name}/custom-nodes")
+async def add_custom_node(name: str, request: AddCustomNodeRequest):
+    """Add a custom node pack to a bundle."""
+    if not request.node_id.strip():
+        raise HTTPException(status_code=400, detail="Custom node id cannot be empty")
+    service = get_bundle_service()
+    success = await service.add_custom_node(
+        name,
+        request.node_id.strip(),
+        request.install_type,
+        request.name,
+        request.repository,
+        request.version,
+    )
+    if not success:
+        raise HTTPException(status_code=404, detail="Bundle not found")
+    return {"status": "added", "install_type": request.install_type, "node_id": request.node_id}
+
+
+@router.delete("/bundles/{name}/custom-nodes/{node_id:path}")
+async def remove_custom_node(name: str, node_id: str, install_type: str = "registry"):
+    """Remove a custom node pack from a bundle."""
+    service = get_bundle_service()
+    success = await service.remove_custom_node(name, install_type, node_id)
+    if not success:
+        raise HTTPException(status_code=404, detail="Bundle or custom node not found")
+    return {"status": "removed", "install_type": install_type, "node_id": node_id}
 
 
 @router.post("/bundles/resolve", response_model=ResolvedBundleResponse)
@@ -149,11 +223,13 @@ async def resolve_bundles(request: ResolveBundlesRequest, req: Request):
     
     service = get_bundle_service()
     resolved = await service.resolve_bundles(request.bundle_names, server_base_url)
+    custom_nodes = await service.resolve_custom_nodes(request.bundle_names)
     
     # Calculate total size
     total_size = sum(a.size or 0 for a in resolved)
     
     return ResolvedBundleResponse(
         assets=resolved,
+        custom_nodes=custom_nodes,
         total_size=total_size if total_size > 0 else None,
     )

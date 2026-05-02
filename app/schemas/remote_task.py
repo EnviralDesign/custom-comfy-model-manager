@@ -14,6 +14,8 @@ TaskType = Literal[
     "PIP_INSTALL_TORCH",
     "PIP_INSTALL_REQUIREMENTS",
     "INSTALL_COMFYUI_MANAGER",
+    "ENABLE_NATIVE_MANAGER",
+    "INSTALL_CUSTOM_NODES",
 ]
 
 class RemoteTaskBase(BaseModel):

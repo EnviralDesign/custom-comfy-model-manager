@@ -137,7 +137,8 @@ class RemoteSessionManager:
             return None
         relpath = item.get("relpath")
         if relpath:
-            return f"relpath:{relpath}"
+            root_type = item.get("root_type") or "models"
+            return f"{root_type}:{relpath}"
         url = item.get("url")
         if url:
             return f"url:{url}"

@@ -93,6 +93,10 @@ class Settings(BaseSettings):
         path.mkdir(parents=True, exist_ok=True)
         return path
 
+    def get_local_input_root(self) -> Path:
+        """Infer the local ComfyUI input directory from the configured models root."""
+        return self.local_models_root.parent / "input"
+
 
 @lru_cache
 def get_settings() -> Settings:

@@ -27,6 +27,7 @@ import subprocess
 import hashlib
 import threading
 import re
+import shutil
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from urllib.parse import urlparse
@@ -36,7 +37,7 @@ BASE_URL = "https://dl.enviral-design.com"  # Set to your home app URL
 API_KEY = "PASTE_KEY_HERE"          # Set to your session key
 HF_API_KEY = os.environ.get("HF_API_KEY", "").strip()
 CIVITAI_API_KEY = os.environ.get("CIVITAI_API_KEY", "").strip()
-PROMPT_OPTIONAL_KEYS = os.environ.get("PROMPT_OPTIONAL_KEYS", "").strip().lower() in {"1", "true", "yes", "y"}
+PROMPT_OPTIONAL_KEYS = os.environ.get("PROMPT_OPTIONAL_KEYS", "1").strip().lower() in {"1", "true", "yes", "y"}
 TORCH_INDEX_URL = os.environ.get("TORCH_INDEX_URL", "").strip()
 TORCH_INDEX_FLAG = os.environ.get("TORCH_INDEX_FLAG", "--extra-index-url").strip()
 TORCH_PACKAGES = os.environ.get("TORCH_PACKAGES", "torch torchvision torchaudio").split()
@@ -99,6 +100,15 @@ def ensure_comfy_dir(task_id=None) -> bool:
         return False
     return True
 
+def get_asset_destination(root_type: str, relpath: str) -> Path:
+    root = "input" if root_type == "input" else "models"
+    clean_path = Path(relpath)
+    if clean_path.is_absolute() or ".." in clean_path.parts:
+        raise ValueError(f"Unsafe asset path: {relpath}")
+    if root == "input":
+        return COMFY_DIR / "input" / clean_path
+    return MODELS_DIR / clean_path
+
 # --- API WRAPPERS ---
 
 def register_agent():
@@ -119,6 +129,26 @@ def register_agent():
     except Exception as e:
         log(f"Registration failed: {e}", error=True)
         sys.exit(1)
+
+def fetch_remote_provider_keys():
+    global HF_API_KEY, CIVITAI_API_KEY
+    try:
+        resp = api_session.get(f"{BASE_URL}/api/remote/agent/secrets", timeout=20)
+        resp.raise_for_status()
+        data = resp.json() or {}
+    except Exception as e:
+        log(f"Could not fetch provider keys from manager: {e}", error=True)
+        return
+
+    hf_key = (data.get("huggingface_api_key") or "").strip()
+    civitai_key = (data.get("civitai_api_key") or "").strip()
+
+    if not HF_API_KEY and hf_key:
+        HF_API_KEY = hf_key
+        log("Received Hugging Face key from manager.")
+    if not CIVITAI_API_KEY and civitai_key:
+        CIVITAI_API_KEY = civitai_key
+        log("Received Civitai key from manager.")
 
 def get_next_task():
     try:
@@ -194,6 +224,12 @@ def get_venv_python() -> Path:
     if platform.system().lower().startswith("win"):
         return venv_path / "Scripts" / "python.exe"
     return venv_path / "bin" / "python"
+
+def get_venv_script(name: str) -> Path:
+    venv_path = COMFY_DIR / ".venv"
+    if platform.system().lower().startswith("win"):
+        return venv_path / "Scripts" / f"{name}.exe"
+    return venv_path / "bin" / name
 
 def run_cmd(cmd, cwd=None):
     try:
@@ -374,9 +410,20 @@ def handle_install_requirements(task):
         update_progress(task['id'], "failed", 0.0, "Requirements install failed", error=err)
         return
 
+    manager_requirements = COMFY_DIR / "manager_requirements.txt"
+    if manager_requirements.exists():
+        update_progress(task['id'], "running", 0.55, "Installing native ComfyUI Manager requirements...")
+        manager_cmd = [str(venv_python), "-m", "pip", "install", "-r", "manager_requirements.txt"]
+        rc, _, err = run_cmd(manager_cmd, cwd=COMFY_DIR)
+        if rc != 0:
+            update_progress(task['id'], "failed", 0.0, "Native manager requirements install failed", error=err)
+            return
+    else:
+        log("manager_requirements.txt not found; skipping native manager dependencies.", error=True)
+
     if EXTRA_PIP_PACKAGES:
         extras_label = " ".join(EXTRA_PIP_PACKAGES)
-        update_progress(task['id'], "running", 0.7, f"Installing extra dependencies: {extras_label}")
+        update_progress(task['id'], "running", 0.75, f"Installing extra dependencies: {extras_label}")
         extra_cmd = [str(venv_python), "-m", "pip", "install", "-U", *EXTRA_PIP_PACKAGES]
         rc, _, err = run_cmd(extra_cmd, cwd=COMFY_DIR)
         if rc != 0:
@@ -399,29 +446,148 @@ def handle_install_requirements(task):
                 update_progress(task['id'], "failed", 0.0, f"Import check failed: {mod}", error=err)
                 return
 
-    update_progress(task['id'], "completed", 1.0, "Requirements installed")
+    update_progress(task['id'], "completed", 1.0, "Requirements installed; launch ComfyUI with --enable-manager")
 
 def handle_install_manager(task):
     if not ensure_comfy_dir(task['id']):
         return
 
-    custom_nodes = COMFY_DIR / "custom_nodes"
-    custom_nodes.mkdir(parents=True, exist_ok=True)
-    dest = custom_nodes / "comfyui-manager"
-
-    if dest.exists() and (dest / ".git").exists():
-        update_progress(task['id'], "completed", 1.0, "ComfyUI-Manager already installed")
+    venv_python = get_venv_python()
+    if not venv_python.exists():
+        update_progress(task['id'], "failed", 0.0, "Venv not found. Create venv first.")
         return
 
-    update_progress(task['id'], "running", 0.0, "Cloning ComfyUI-Manager...")
-    rc, _, err = run_cmd(
-        ["git", "clone", "https://github.com/ltdrdata/ComfyUI-Manager", str(dest)],
-        cwd=custom_nodes
-    )
-    if rc == 0:
-        update_progress(task['id'], "completed", 1.0, "ComfyUI-Manager installed. Restart ComfyUI to load it.")
+    ok, err = ensure_pip(task['id'])
+    if not ok:
+        update_progress(task['id'], "failed", 0.0, "pip is missing in venv", error=err)
+        return
+
+    manager_requirements = COMFY_DIR / "manager_requirements.txt"
+    if not manager_requirements.exists():
+        update_progress(
+            task['id'],
+            "failed",
+            0.0,
+            "manager_requirements.txt not found. Update ComfyUI before enabling native manager.",
+        )
+        return
+
+    update_progress(task['id'], "running", 0.0, "Installing native ComfyUI Manager requirements...")
+    rc, _, err = run_cmd([str(venv_python), "-m", "pip", "install", "-r", "manager_requirements.txt"], cwd=COMFY_DIR)
+    if rc != 0:
+        update_progress(task['id'], "failed", 0.0, "Native manager requirements install failed", error=err)
+        return
+
+    legacy_dirs = [
+        COMFY_DIR / "custom_nodes" / "comfyui-manager",
+        COMFY_DIR / "custom_nodes" / "ComfyUI-Manager",
+    ]
+    legacy_found = [str(path) for path in legacy_dirs if path.exists()]
+    if legacy_found:
+        msg = (
+            "Native manager dependencies installed. Legacy custom-node manager is still present; "
+            "remove or disable it to avoid duplicate manager behavior. "
+            f"Launch ComfyUI with --enable-manager. Legacy paths: {', '.join(legacy_found)}"
+        )
     else:
-        update_progress(task['id'], "failed", 0.0, "ComfyUI-Manager install failed", error=err)
+        msg = "Native manager enabled. Launch ComfyUI with --enable-manager."
+
+    update_progress(task['id'], "completed", 1.0, msg)
+
+def safe_custom_node_dir_name(value: str) -> str:
+    value = value.rstrip("/").split("/")[-1]
+    if value.endswith(".git"):
+        value = value[:-4]
+    value = re.sub(r"[^A-Za-z0-9_.-]+", "-", value).strip(".-")
+    return value or "custom-node"
+
+def handle_install_custom_nodes(task):
+    payload = task.get("payload", {})
+    nodes = payload.get("nodes") or []
+    if not nodes:
+        update_progress(task["id"], "completed", 1.0, "No custom nodes to install")
+        return
+
+    if not ensure_comfy_dir(task["id"]):
+        return
+
+    venv_python = get_venv_python()
+    if not venv_python.exists():
+        update_progress(task["id"], "failed", 0.0, "Venv not found. Create venv first.")
+        return
+
+    ok, err = ensure_pip(task["id"])
+    if not ok:
+        update_progress(task["id"], "failed", 0.0, "pip is missing in venv", error=err)
+        return
+
+    total = len(nodes)
+    custom_nodes_dir = COMFY_DIR / "custom_nodes"
+    custom_nodes_dir.mkdir(parents=True, exist_ok=True)
+
+    for idx, node in enumerate(nodes, start=1):
+        install_type = (node.get("install_type") or "registry").lower()
+        node_id = (node.get("node_id") or "").strip()
+        name = node.get("name") or node_id
+        repo = (node.get("repository") or "").strip()
+        progress_base = (idx - 1) / total
+        progress_done = idx / total
+
+        if not node_id:
+            continue
+
+        update_progress(task["id"], "running", progress_base, f"Installing custom node {idx}/{total}: {name}")
+
+        if install_type == "registry":
+            rc, _, pip_err = run_cmd([str(venv_python), "-m", "pip", "install", "-U", "comfy-cli"], cwd=COMFY_DIR)
+            if rc != 0:
+                update_progress(task["id"], "failed", progress_base, "Failed to install comfy-cli", error=pip_err)
+                return
+
+            comfy_exe = get_venv_script("comfy")
+            if comfy_exe.exists():
+                rc, out, cli_err = run_cmd([str(comfy_exe), "--workspace", str(COMFY_DIR), "node", "install", node_id], cwd=COMFY_DIR)
+            else:
+                comfy_path = shutil.which("comfy")
+                if comfy_path:
+                    rc, out, cli_err = run_cmd([comfy_path, "--workspace", str(COMFY_DIR), "node", "install", node_id], cwd=COMFY_DIR)
+                else:
+                    rc, out, cli_err = 127, "", "comfy command not found after installing comfy-cli"
+            if rc == 0:
+                update_progress(task["id"], "running", progress_done, f"Installed custom node: {name}")
+                continue
+
+            if not repo:
+                update_progress(task["id"], "failed", progress_base, f"Registry install failed: {name}", error=cli_err or out)
+                return
+
+            log(f"Registry install failed for {node_id}; falling back to git clone {repo}", error=True)
+
+        git_url = repo or node_id
+        if not git_url.startswith(("http://", "https://", "git@")):
+            update_progress(task["id"], "failed", progress_base, f"No usable Git URL for {name}")
+            return
+
+        dest = custom_nodes_dir / safe_custom_node_dir_name(git_url)
+        if dest.exists():
+            update_progress(task["id"], "running", progress_done, f"Custom node already present: {name}")
+            continue
+
+        rc, _, git_err = run_cmd(["git", "clone", git_url, str(dest)], cwd=custom_nodes_dir)
+        if rc != 0:
+            update_progress(task["id"], "failed", progress_base, f"Git clone failed: {name}", error=git_err)
+            return
+
+        requirements = dest / "requirements.txt"
+        if requirements.exists():
+            rc, _, req_err = run_cmd([str(venv_python), "-m", "pip", "install", "-r", str(requirements)], cwd=COMFY_DIR)
+            if rc != 0:
+                update_progress(task["id"], "failed", progress_base, f"Requirements install failed: {name}", error=req_err)
+                return
+
+        update_progress(task["id"], "running", progress_done, f"Installed custom node: {name}")
+
+    update_progress(task["id"], "completed", 1.0, f"Installed {total} custom node pack(s). Restart ComfyUI to load them.")
 
 def download_from_source(url, dest_path, task_id, existing_size=0, extra_headers=None, session=None, should_cancel=None):
     sess = session or download_session
@@ -504,6 +670,7 @@ def handle_download(task):
     payload = task.get('payload', {})
     file_hash = payload.get('hash')
     relpath = payload.get('relpath')
+    root_type = payload.get('root_type', 'models')
     
     if not ensure_comfy_dir(task['id']):
         return
@@ -528,7 +695,12 @@ def handle_download(task):
         update_progress(task['id'], "failed", 0.0, "No relative path provided")
         return
         
-    final_dest = MODELS_DIR / resolution['relpath']
+    root_type = resolution.get('root_type') or root_type
+    try:
+        final_dest = get_asset_destination(root_type, resolution['relpath'])
+    except ValueError as e:
+        update_progress(task['id'], "failed", 0.0, str(e), error=str(e))
+        return
     final_dest.parent.mkdir(parents=True, exist_ok=True)
     
     # Check if exists (Simple check, not verifying hash in this iteration)
@@ -616,11 +788,13 @@ def handle_download_urls(task):
         url = item.get('url')
         size_bytes = item.get('size_bytes') or item.get('size')
         provider = item.get('provider') or (get_provider_from_url(url) if url else "unknown")
-        key = relpath or url or f"item_{i+1}"
+        root_type = item.get('root_type') or "models"
+        key = f"{root_type}:{relpath}" if relpath else (url or f"item_{i+1}")
         items_status[key] = "pending"
         normalized_items.append({
             "key": key,
             "relpath": relpath,
+            "root_type": root_type,
             "url": url,
             "size_bytes": size_bytes,
             "provider": provider,
@@ -694,6 +868,7 @@ def handle_download_urls(task):
             if should_cancel():
                 break
             relpath = item.get('relpath')
+            root_type = item.get('root_type') or "models"
             url = item.get('url')
             item_key = item.get('key')
 
@@ -710,7 +885,12 @@ def handle_download_urls(task):
                 update_item(item_key, "skipped", f"Skipped Civitai (no key): {relpath}", done_delta=1)
                 continue
 
-            dest_path = MODELS_DIR / relpath
+            try:
+                dest_path = get_asset_destination(root_type, relpath)
+            except ValueError as e:
+                log(str(e), error=True)
+                update_item(item_key, "failed", str(e), done_delta=1)
+                continue
             dest_path.parent.mkdir(parents=True, exist_ok=True)
 
             if dest_path.exists():
@@ -792,23 +972,6 @@ def main():
         except KeyboardInterrupt:
             return
 
-    if PROMPT_OPTIONAL_KEYS:
-        if not HF_API_KEY:
-            try:
-                val = input("Enter Hugging Face API Key (optional, press Enter to skip): ").strip()
-                if val:
-                    HF_API_KEY = val
-            except KeyboardInterrupt:
-                return
-
-        if not CIVITAI_API_KEY:
-            try:
-                val = input("Enter Civitai API Key (optional, press Enter to skip): ").strip()
-                if val:
-                    CIVITAI_API_KEY = val
-            except KeyboardInterrupt:
-                return
-
     # Configure ComfyUI directory
     comfy_path = COMFY_DIR_ENV
     if not comfy_path:
@@ -835,6 +998,24 @@ def main():
     set_comfy_dir(str(expanded))
 
     register_agent()
+    fetch_remote_provider_keys()
+
+    if PROMPT_OPTIONAL_KEYS:
+        if not HF_API_KEY:
+            try:
+                val = input("Enter Hugging Face API Key (optional, press Enter to skip): ").strip()
+                if val:
+                    HF_API_KEY = val
+            except KeyboardInterrupt:
+                return
+
+        if not CIVITAI_API_KEY:
+            try:
+                val = input("Enter Civitai API Key (optional, press Enter to skip): ").strip()
+                if val:
+                    CIVITAI_API_KEY = val
+            except KeyboardInterrupt:
+                return
     
     log("Waiting for tasks (Ctrl+C to stop)...")
     
@@ -860,8 +1041,10 @@ def main():
                     handle_install_torch(task)
                 elif task['type'] == 'PIP_INSTALL_REQUIREMENTS':
                     handle_install_requirements(task)
-                elif task['type'] == 'INSTALL_COMFYUI_MANAGER':
+                elif task['type'] in ('INSTALL_COMFYUI_MANAGER', 'ENABLE_NATIVE_MANAGER'):
                     handle_install_manager(task)
+                elif task['type'] == 'INSTALL_CUSTOM_NODES':
+                    handle_install_custom_nodes(task)
                 else:
                     log(f"Unknown task type: {task['type']}")
                     update_progress(task['id'], "failed", error="Unknown task type")

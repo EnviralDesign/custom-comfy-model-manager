@@ -6,14 +6,24 @@ from pydantic import BaseModel
 from urllib.parse import quote
 
 from app.database import get_db
+from app.config import get_settings
 
 
 class BundleAsset(BaseModel):
+    root_type: str = "models"
     relpath: str
     hash: Optional[str] = None
     source_url_override: Optional[str] = None
     source_url: Optional[str] = None
     size: Optional[int] = None
+
+
+class BundleCustomNode(BaseModel):
+    install_type: str = "registry"
+    node_id: str
+    name: Optional[str] = None
+    repository: Optional[str] = None
+    version: Optional[str] = None
 
 
 class Bundle(BaseModel):
@@ -23,10 +33,12 @@ class Bundle(BaseModel):
     created_at: str
     updated_at: str
     assets: List[BundleAsset] = []
+    custom_nodes: List[BundleCustomNode] = []
     asset_count: int = 0
 
 
 class ResolvedAsset(BaseModel):
+    root_type: str = "models"
     relpath: str
     url: str
     hash: Optional[str] = None
@@ -35,6 +47,9 @@ class ResolvedAsset(BaseModel):
 
 class BundleService:
     """Manages bundles and their assets."""
+
+    def _normalize_root_type(self, root_type: Optional[str]) -> str:
+        return "input" if root_type == "input" else "models"
     
     async def list_bundles(self) -> List[Bundle]:
         """List all bundles with their asset counts."""
@@ -79,11 +94,12 @@ class BundleService:
             
             # Get assets with potential global source URLs
             cursor = await db.execute("""
-                SELECT ba.relpath, ba.hash, ba.source_url_override,
-                       COALESCE(su_hash.url, su_path.url) as global_source_url,
+                SELECT ba.root_type, ba.relpath, ba.hash, ba.source_url_override,
+                       COALESCE(su_hash.url, su_typed_path.url, su_path.url) as global_source_url,
                        fi.size as size
                 FROM bundle_assets ba
                 LEFT JOIN source_urls su_hash ON su_hash.key = ba.hash AND ba.hash IS NOT NULL
+                LEFT JOIN source_urls su_typed_path ON su_typed_path.key = ba.root_type || ':' || ba.relpath
                 LEFT JOIN source_urls su_path ON su_path.key = 'relpath:' || ba.relpath
                 LEFT JOIN (
                     SELECT relpath, MAX(size) as size
@@ -91,17 +107,35 @@ class BundleService:
                     GROUP BY relpath
                 ) fi ON fi.relpath = ba.relpath
                 WHERE ba.bundle_id = ?
-                ORDER BY ba.relpath
+                ORDER BY ba.root_type, ba.relpath
             """, (row["id"],))
             
             assets = await cursor.fetchall()
             for asset_row in assets:
                 bundle.assets.append(BundleAsset(
+                    root_type=asset_row["root_type"] or "models",
                     relpath=asset_row["relpath"],
                     hash=asset_row["hash"],
                     source_url_override=asset_row["source_url_override"],
                     source_url=asset_row["global_source_url"],
                     size=asset_row["size"],
+                ))
+
+            cursor = await db.execute("""
+                SELECT install_type, node_id, name, repository, version
+                FROM bundle_custom_nodes
+                WHERE bundle_id = ?
+                ORDER BY install_type, name, node_id
+            """, (row["id"],))
+
+            node_rows = await cursor.fetchall()
+            for node_row in node_rows:
+                bundle.custom_nodes.append(BundleCustomNode(
+                    install_type=node_row["install_type"] or "registry",
+                    node_id=node_row["node_id"],
+                    name=node_row["name"],
+                    repository=node_row["repository"],
+                    version=node_row["version"],
                 ))
             
             bundle.asset_count = len(assets)
@@ -150,19 +184,83 @@ class BundleService:
             )
             await db.commit()
             return cursor.rowcount > 0
+
+    async def add_custom_node(
+        self,
+        bundle_name: str,
+        node_id: str,
+        install_type: str = "registry",
+        name: Optional[str] = None,
+        repository: Optional[str] = None,
+        version: Optional[str] = None,
+    ) -> bool:
+        """Add a custom node pack to a bundle."""
+        bundle = await self.get_bundle(bundle_name)
+        if not bundle:
+            return False
+
+        install_type = "git" if install_type == "git" else "registry"
+        now = datetime.now(timezone.utc).isoformat()
+        async with get_db() as db:
+            await db.execute(
+                """
+                INSERT OR REPLACE INTO bundle_custom_nodes
+                    (bundle_id, install_type, node_id, name, repository, version)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (bundle.id, install_type, node_id, name, repository, version),
+            )
+            await db.execute("UPDATE bundles SET updated_at = ? WHERE id = ?", (now, bundle.id))
+            await db.commit()
+            return True
+
+    async def remove_custom_node(self, bundle_name: str, install_type: str, node_id: str) -> bool:
+        """Remove a custom node pack from a bundle."""
+        bundle = await self.get_bundle(bundle_name)
+        if not bundle:
+            return False
+
+        install_type = "git" if install_type == "git" else "registry"
+        now = datetime.now(timezone.utc).isoformat()
+        async with get_db() as db:
+            cursor = await db.execute(
+                "DELETE FROM bundle_custom_nodes WHERE bundle_id = ? AND install_type = ? AND node_id = ?",
+                (bundle.id, install_type, node_id),
+            )
+            if cursor.rowcount > 0:
+                await db.execute("UPDATE bundles SET updated_at = ? WHERE id = ?", (now, bundle.id))
+            await db.commit()
+            return cursor.rowcount > 0
+
+    async def resolve_custom_nodes(self, bundle_names: List[str]) -> List[BundleCustomNode]:
+        """Resolve custom node packs from multiple bundles, deduped by type and id."""
+        seen = set()
+        result: List[BundleCustomNode] = []
+        for bundle_name in bundle_names:
+            bundle = await self.get_bundle(bundle_name)
+            if not bundle:
+                continue
+            for node in bundle.custom_nodes:
+                key = (node.install_type, node.node_id)
+                if key in seen:
+                    continue
+                seen.add(key)
+                result.append(node)
+        return result
     
-    async def add_asset(self, bundle_name: str, relpath: str, hash: Optional[str] = None, source_url_override: Optional[str] = None) -> bool:
+    async def add_asset(self, bundle_name: str, relpath: str, hash: Optional[str] = None, source_url_override: Optional[str] = None, root_type: str = "models") -> bool:
         """Add an asset to a bundle."""
         bundle = await self.get_bundle(bundle_name)
         if not bundle:
             return False
+        root_type = self._normalize_root_type(root_type)
         
         now = datetime.now(timezone.utc).isoformat()
         async with get_db() as db:
             try:
                 await db.execute(
-                    "INSERT OR REPLACE INTO bundle_assets (bundle_id, relpath, hash, source_url_override) VALUES (?, ?, ?, ?)",
-                    (bundle.id, relpath, hash, source_url_override)
+                    "INSERT OR REPLACE INTO bundle_assets (bundle_id, root_type, relpath, hash, source_url_override) VALUES (?, ?, ?, ?, ?)",
+                    (bundle.id, root_type, relpath, hash, source_url_override)
                 )
                 await db.execute(
                     "UPDATE bundles SET updated_at = ? WHERE id = ?",
@@ -174,11 +272,12 @@ class BundleService:
                 print(f"Failed to add asset: {e}")
                 return False
 
-    async def add_folder(self, bundle_name: str, folder_path: str) -> int:
+    async def add_folder(self, bundle_name: str, folder_path: str, root_type: str = "models") -> int:
         """Add all files in a folder (recursive) to a bundle."""
         bundle = await self.get_bundle(bundle_name)
         if not bundle:
             return 0
+        root_type = self._normalize_root_type(root_type)
             
         async with get_db() as db:
             # Find all files in index starting with folder_path
@@ -199,9 +298,9 @@ class BundleService:
             
             # Batch add (INSERT OR REPLACE prevents duplicates if some files already in bundle)
             await db.executemany("""
-                INSERT OR REPLACE INTO bundle_assets (bundle_id, relpath, hash)
-                VALUES (?, ?, ?)
-            """, [(bundle.id, a["relpath"], a["hash"]) for a in assets_to_add])
+                INSERT OR REPLACE INTO bundle_assets (bundle_id, root_type, relpath, hash)
+                VALUES (?, ?, ?, ?)
+            """, [(bundle.id, root_type, a["relpath"], a["hash"]) for a in assets_to_add])
             
             await db.execute(
                 "UPDATE bundles SET updated_at = ? WHERE id = ?",
@@ -210,17 +309,18 @@ class BundleService:
             await db.commit()
             return len(assets_to_add)
     
-    async def remove_asset(self, bundle_name: str, relpath: str) -> bool:
+    async def remove_asset(self, bundle_name: str, relpath: str, root_type: str = "models") -> bool:
         """Remove an asset from a bundle."""
         bundle = await self.get_bundle(bundle_name)
         if not bundle:
             return False
+        root_type = self._normalize_root_type(root_type)
         
         now = datetime.now(timezone.utc).isoformat()
         async with get_db() as db:
             cursor = await db.execute(
-                "DELETE FROM bundle_assets WHERE bundle_id = ? AND relpath = ?",
-                (bundle.id, relpath)
+                "DELETE FROM bundle_assets WHERE bundle_id = ? AND root_type = ? AND relpath = ?",
+                (bundle.id, root_type, relpath)
             )
             if cursor.rowcount > 0:
                 await db.execute(
@@ -233,10 +333,10 @@ class BundleService:
     async def resolve_bundles(self, bundle_names: List[str], server_base_url: str) -> List[ResolvedAsset]:
         """
         Resolve multiple bundles to a list of downloadable assets.
-        Deduplicates by relpath (union of all bundles).
+        Deduplicates by root and relpath (union of all bundles).
         Returns best URL for each asset.
         """
-        seen_relpaths = set()
+        seen_assets = set()
         candidates = []
         
         async with get_db() as db:
@@ -246,9 +346,10 @@ class BundleService:
                     continue
                 
                 for asset in bundle.assets:
-                    if asset.relpath in seen_relpaths:
+                    asset_key = (asset.root_type, asset.relpath)
+                    if asset_key in seen_assets:
                         continue
-                    seen_relpaths.add(asset.relpath)
+                    seen_assets.add(asset_key)
                     
                     public_url = await self._resolve_public_url(db, asset)
                     local_url = await self._resolve_local_url(db, asset, server_base_url)
@@ -258,6 +359,7 @@ class BundleService:
                     
                     candidates.append({
                         "relpath": asset.relpath,
+                        "root_type": asset.root_type,
                         "hash": asset.hash,
                         "size": asset.size,
                         "public_url": public_url,
@@ -275,13 +377,13 @@ class BundleService:
             both_sorted = sorted(both, key=size_key)
             # Smallest half go to local, largest half go to public
             local_count = max(1, len(both_sorted) // 2) if len(both_sorted) > 1 else 1
-            local_selected = {c["relpath"] for c in both_sorted[:local_count]}
+            local_selected = {(c["root_type"], c["relpath"]) for c in both_sorted[:local_count]}
 
         resolved = []
         for c in candidates:
             url = None
             if c["public_url"] and c["local_url"]:
-                url = c["local_url"] if c["relpath"] in local_selected else c["public_url"]
+                url = c["local_url"] if (c["root_type"], c["relpath"]) in local_selected else c["public_url"]
             elif c["public_url"]:
                 url = c["public_url"]
             elif c["local_url"]:
@@ -291,6 +393,7 @@ class BundleService:
                 continue
             
             resolved.append(ResolvedAsset(
+                root_type=c["root_type"],
                 relpath=c["relpath"],
                 url=url,
                 hash=c["hash"],
@@ -313,19 +416,38 @@ class BundleService:
             if row:
                 return row["url"]
         
-        cursor = await db.execute(
-            "SELECT url FROM source_urls WHERE key = ?",
-            (f"relpath:{asset.relpath}",)
-        )
+        typed_key = f"{asset.root_type}:{asset.relpath}"
+        cursor = await db.execute("SELECT url FROM source_urls WHERE key = ?", (typed_key,))
         row = await cursor.fetchone()
         if row:
             return row["url"]
+
+        if asset.root_type == "models":
+            cursor = await db.execute(
+                "SELECT url FROM source_urls WHERE key = ?",
+                (f"relpath:{asset.relpath}",)
+            )
+            row = await cursor.fetchone()
+            if row:
+                return row["url"]
         
         return None
 
     async def _resolve_local_url(self, db, asset: BundleAsset, server_base_url: str) -> Optional[str]:
         """Resolve a local or lake stream URL for an asset if indexed."""
         base_url = server_base_url.rstrip("/")
+
+        if asset.root_type == "input":
+            settings = get_settings()
+            input_root = settings.get_local_input_root()
+            input_path = (input_root / asset.relpath).resolve()
+            try:
+                input_path.relative_to(input_root.resolve())
+            except ValueError:
+                return None
+            if input_path.exists() and input_path.is_file():
+                return f"{base_url}/api/remote/assets/file?side=input&relpath={quote(asset.relpath, safe='')}"
+            return None
 
         # Prefer local if present, else lake
         cursor = await db.execute(

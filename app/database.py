@@ -157,14 +157,29 @@ CREATE TABLE IF NOT EXISTS bundles (
 CREATE TABLE IF NOT EXISTS bundle_assets (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     bundle_id INTEGER NOT NULL REFERENCES bundles(id) ON DELETE CASCADE,
+    root_type TEXT NOT NULL DEFAULT 'models',
     relpath TEXT NOT NULL,
     hash TEXT,  -- optional, for verification
     source_url_override TEXT,  -- optional, override global source_url
-    UNIQUE(bundle_id, relpath)
+    UNIQUE(bundle_id, root_type, relpath)
 );
 
 CREATE INDEX IF NOT EXISTS idx_bundle_assets_bundle ON bundle_assets(bundle_id);
 CREATE INDEX IF NOT EXISTS idx_bundle_assets_relpath ON bundle_assets(relpath);
+
+-- Bundle custom nodes: registry or Git-backed custom node packs to install before provisioning files
+CREATE TABLE IF NOT EXISTS bundle_custom_nodes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    bundle_id INTEGER NOT NULL REFERENCES bundles(id) ON DELETE CASCADE,
+    install_type TEXT NOT NULL DEFAULT 'registry',
+    node_id TEXT NOT NULL,
+    name TEXT,
+    repository TEXT,
+    version TEXT,
+    UNIQUE(bundle_id, install_type, node_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_bundle_custom_nodes_bundle ON bundle_custom_nodes(bundle_id);
 """
 
 
@@ -172,6 +187,11 @@ async def init_db(db_path: Path) -> None:
     """Initialize the database with schema."""
     async with aiosqlite.connect(db_path) as db:
         await db.executescript(SCHEMA)
+        cursor = await db.execute("PRAGMA table_info(bundle_assets)")
+        cols = {row[1] for row in await cursor.fetchall()}
+        if "root_type" not in cols:
+            await db.execute("ALTER TABLE bundle_assets ADD COLUMN root_type TEXT NOT NULL DEFAULT 'models'")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_bundle_assets_root_relpath ON bundle_assets(root_type, relpath)")
         await db.commit()
 
 
