@@ -35,6 +35,7 @@ import hashlib
 import threading
 import re
 import shutil
+import configparser
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from urllib.parse import urlparse
@@ -84,6 +85,24 @@ BASE_HOST = urlparse(BASE_URL).netloc.lower()
 USER_AGENT = "ComfyRemoteAgent/0.1"
 CHUNK_SIZE = DOWNLOAD_CHUNK_MIB * 1024 * 1024
 STALL_TIMEOUT = 45
+NATIVE_MANAGER_CONFIG_DEFAULTS = {
+    "git_exe": "",
+    "use_uv": "True",
+    "use_unified_resolver": "False",
+    "channel_url": "https://raw.githubusercontent.com/ltdrdata/ComfyUI-Manager/main",
+    "share_option": "all",
+    "bypass_ssl": "False",
+    "file_logging": "True",
+    "update_policy": "stable-comfyui",
+    "windows_selector_event_loop_policy": "False",
+    "model_download_by_agent": "False",
+    "downgrade_blacklist": "",
+    "security_level": "normal",
+    "always_lazy_install": "False",
+    "network_mode": "personal_cloud",
+    "db_mode": "cache",
+    "verbose": "False",
+}
 
 # --- SETUP ---
 COMFY_DIR = None
@@ -167,6 +186,55 @@ def ensure_comfy_dir(task_id=None) -> bool:
         else:
             log(msg, error=True)
         return False
+    return True
+
+def ensure_native_manager_policy(task_id=None, progress=0.0) -> bool:
+    """Create/update native ComfyUI Manager policy so registry installs are allowed."""
+    if COMFY_DIR is None:
+        msg = "ComfyUI path not set; cannot configure native manager policy."
+        if task_id:
+            update_progress(task_id, "failed", progress, msg)
+        else:
+            log(msg, error=True)
+        return False
+
+    config_path = COMFY_DIR / "user" / "__manager" / "config.ini"
+    config = configparser.ConfigParser(strict=False)
+    if config_path.exists():
+        config.read(config_path)
+
+    if not config.has_section("default"):
+        config["default"] = {}
+
+    default = config["default"]
+    for key, value in NATIVE_MANAGER_CONFIG_DEFAULTS.items():
+        if key not in default:
+            default[key] = value
+
+    changed = (
+        default.get("network_mode", "").lower() != "personal_cloud"
+        or default.get("security_level", "").lower() != "normal"
+    )
+    default["network_mode"] = "personal_cloud"
+    default["security_level"] = "normal"
+
+    try:
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+        with config_path.open("w", encoding="utf-8") as config_file:
+            config.write(config_file)
+    except OSError as exc:
+        msg = f"Failed to write native manager config: {config_path}"
+        if task_id:
+            update_progress(task_id, "failed", progress, msg, error=str(exc))
+        else:
+            log(f"{msg}: {exc}", error=True)
+        return False
+
+    if changed:
+        log(
+            "Configured native ComfyUI Manager policy "
+            f"({config_path}: network_mode=personal_cloud, security_level=normal)."
+        )
     return True
 
 def normalize_asset_relpath(relpath: str) -> Path:
@@ -685,6 +753,8 @@ def handle_install_requirements(task):
         if rc != 0:
             update_progress(task['id'], "failed", 0.0, "Native manager requirements install failed", error=err)
             return
+        if not ensure_native_manager_policy(task['id'], 0.7):
+            return
     else:
         log("manager_requirements.txt not found; skipping native manager dependencies.", error=True)
 
@@ -752,6 +822,9 @@ def handle_install_manager(task):
         update_progress(task['id'], "failed", 0.0, "Native manager installed but cm_cli is not importable", error=err)
         return
 
+    if not ensure_native_manager_policy(task['id'], 0.9):
+        return
+
     legacy_dirs = [
         COMFY_DIR / "custom_nodes" / "comfyui-manager",
         COMFY_DIR / "custom_nodes" / "ComfyUI-Manager",
@@ -789,6 +862,9 @@ def ensure_official_manager_cli(task_id: str, progress: float = 0.0) -> bool:
     rc, _, err = run_cmd([str(venv_python), "-c", "import cm_cli"], cwd=COMFY_DIR)
     if rc != 0:
         update_progress(task_id, "failed", progress, "cm_cli is not importable after manager requirements install", error=err)
+        return False
+
+    if not ensure_native_manager_policy(task_id, progress):
         return False
 
     comfy_exe = get_venv_script("comfy")

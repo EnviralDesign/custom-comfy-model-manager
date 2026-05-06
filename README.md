@@ -97,6 +97,9 @@ uv run comfy launch -- --listen 0.0.0.0 --port 8188 --enable-manager
 ```
 
 Use Lightning's port viewer or public port URL for port `8188`.
+During dependency/manager setup, the bootstrapper writes native ComfyUI Manager's
+`user/__manager/config.ini` with `network_mode=personal_cloud` and
+`security_level=normal` so registry installs are allowed from Lightning.
 
 Local transfer tuning:
 
