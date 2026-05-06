@@ -135,6 +135,7 @@ document.addEventListener('DOMContentLoaded', () => {
     function renderBundles(bundles) {
         if (!bundles || bundles.length === 0) {
             els.bundleList.innerHTML = '<div class="text-secondary text-sm">No bundles found.</div>';
+            updateRunAllLabel();
             return;
         }
 
@@ -144,91 +145,114 @@ document.addEventListener('DOMContentLoaded', () => {
                 <span style="font-size: 0.9rem;">${b.name}</span>
             </label>
         `).join('');
+
+        els.bundleList.querySelectorAll('.bundle-checkbox').forEach(cb => {
+            cb.addEventListener('change', updateRunAllLabel);
+        });
+        updateRunAllLabel();
     }
 
-    async function provisionBundles() {
-        const selected = Array.from(els.bundleList.querySelectorAll('.bundle-checkbox:checked'))
+    function getSelectedBundleNames() {
+        if (!els.bundleList) return [];
+        return Array.from(els.bundleList.querySelectorAll('.bundle-checkbox:checked'))
             .map(cb => cb.dataset.name);
+    }
 
+    function updateRunAllLabel() {
+        if (!els.btnRunAll) return;
+        const selected = getSelectedBundleNames();
+        els.btnRunAll.textContent = selected.length > 0
+            ? '▶ Run All Setup (1-6)'
+            : '▶ Run All Setup (1-5)';
+    }
+
+    async function enqueueProvisionBundles(selected, { showEmptyAlert = true } = {}) {
         if (selected.length === 0) {
-            alert('Please select at least one bundle.');
+            if (showEmptyAlert) {
+                alert('Please select at least one bundle.');
+            }
             return;
         }
 
-        els.btnProvision.disabled = true;
-        try {
-            // 1. Resolve bundles to URLs
-            const res = await fetch('/api/bundles/resolve', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ bundle_names: selected })
-            });
-            if (!res.ok) {
-                throw new Error(await extractErrorMessage(res, 'Bundle resolve failed'));
-            }
-            const data = await res.json();
+        // 1. Resolve bundles to URLs
+        const res = await fetch('/api/bundles/resolve', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ bundle_names: selected })
+        });
+        if (!res.ok) {
+            throw new Error(await extractErrorMessage(res, 'Bundle resolve failed'));
+        }
+        const data = await res.json();
 
-            if (!data.assets || data.assets.length === 0) {
-                if (!data.custom_nodes || data.custom_nodes.length === 0) {
-                    alert('Selected bundles contain no valid assets/URLs or custom nodes.');
-                    return;
-                }
-            }
-
-            if (data.custom_nodes && data.custom_nodes.length > 0) {
-                await enqueueTask('INSTALL_CUSTOM_NODES', {
-                    nodes: data.custom_nodes
-                }, `Install custom nodes for ${selected.join(', ')}`);
-            }
-
-            // Deduplicate by target root + relpath and skip malformed entries
-            const uniq = new Map();
-            data.assets.forEach(a => {
-                if (!a || !a.relpath || !a.url) return;
-                const rootType = a.root_type || 'models';
-                const key = `${rootType}:${a.relpath}`;
-                if (!uniq.has(key)) uniq.set(key, a);
-            });
-            const items = Array.from(uniq.values()).map(a => ({
-                root_type: a.root_type || 'models',
-                relpath: a.relpath,
-                url: a.url,
-                hash: a.hash,
-                size_bytes: a.size,
-                provider: providerFromUrl(a.url)
-            }));
-
-            const workflowItems = items.filter(item => item.root_type === 'workflows');
-            const inputItems = items.filter(item => item.root_type === 'input');
-            const modelItems = items.filter(item => !['workflows', 'input'].includes(item.root_type));
-
-            if (items.length === 0) {
-                if (!data.custom_nodes || data.custom_nodes.length === 0) {
-                    alert('No valid assets to provision after filtering.');
-                }
+        if (!data.assets || data.assets.length === 0) {
+            if (!data.custom_nodes || data.custom_nodes.length === 0) {
+                alert('Selected bundles contain no valid assets/URLs or custom nodes.');
                 return;
             }
+        }
 
-            // 2. Enqueue download tasks in dependency order: workflows, inputs, then heavy models.
-            // Payload format for DOWNLOAD_URLS: { items: [ {root_type, relpath, url, hash, size_bytes}, ... ] }
-            if (workflowItems.length > 0) {
-                await enqueueTask('DOWNLOAD_URLS', {
-                    items: workflowItems
-                }, `Download workflows for ${selected.join(', ')}`);
+        if (data.custom_nodes && data.custom_nodes.length > 0) {
+            await enqueueTask('INSTALL_CUSTOM_NODES', {
+                nodes: data.custom_nodes
+            }, `Install custom nodes for ${selected.join(', ')}`);
+        }
+
+        // Deduplicate by target root + relpath and skip malformed entries
+        const uniq = new Map();
+        data.assets.forEach(a => {
+            if (!a || !a.relpath || !a.url) return;
+            const rootType = a.root_type || 'models';
+            const key = `${rootType}:${a.relpath}`;
+            if (!uniq.has(key)) uniq.set(key, a);
+        });
+        const items = Array.from(uniq.values()).map(a => ({
+            root_type: a.root_type || 'models',
+            relpath: a.relpath,
+            url: a.url,
+            hash: a.hash,
+            size_bytes: a.size,
+            provider: providerFromUrl(a.url)
+        }));
+
+        const workflowItems = items.filter(item => item.root_type === 'workflows');
+        const inputItems = items.filter(item => item.root_type === 'input');
+        const modelItems = items.filter(item => !['workflows', 'input'].includes(item.root_type));
+
+        if (items.length === 0) {
+            if (!data.custom_nodes || data.custom_nodes.length === 0) {
+                alert('No valid assets to provision after filtering.');
             }
+            return;
+        }
 
-            if (inputItems.length > 0) {
-                await enqueueTask('DOWNLOAD_URLS', {
-                    items: inputItems
-                }, `Download input files for ${selected.join(', ')}`);
-            }
+        // 2. Enqueue download tasks in dependency order: workflows, inputs, then heavy models.
+        // Payload format for DOWNLOAD_URLS: { items: [ {root_type, relpath, url, hash, size_bytes}, ... ] }
+        if (workflowItems.length > 0) {
+            await enqueueTask('DOWNLOAD_URLS', {
+                items: workflowItems
+            }, `Download workflows for ${selected.join(', ')}`);
+        }
 
-            if (modelItems.length > 0) {
-                await enqueueTask('DOWNLOAD_URLS', {
-                    items: modelItems
-                }, `Download models for ${selected.join(', ')}`);
-            }
+        if (inputItems.length > 0) {
+            await enqueueTask('DOWNLOAD_URLS', {
+                items: inputItems
+            }, `Download input files for ${selected.join(', ')}`);
+        }
 
+        if (modelItems.length > 0) {
+            await enqueueTask('DOWNLOAD_URLS', {
+                items: modelItems
+            }, `Download models for ${selected.join(', ')}`);
+        }
+    }
+
+    async function provisionBundles() {
+        const selected = getSelectedBundleNames();
+
+        els.btnProvision.disabled = true;
+        try {
+            await enqueueProvisionBundles(selected);
         } catch (e) {
             console.error('Provisioning failed', e);
             alert('Failed to provision: ' + e.message);
@@ -292,6 +316,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
         els.btnRunAll.disabled = true;
         try {
+            const selectedBundles = getSelectedBundleNames();
             await enqueueTask('COMFY_GIT_CLONE', {}, 'Clone ComfyUI Repo');
             await enqueueTask('CREATE_VENV', {}, 'Create Venv (Python 3.13)');
             await enqueueTask('PIP_INSTALL_TORCH', {
@@ -301,6 +326,9 @@ document.addEventListener('DOMContentLoaded', () => {
             }, 'Install PyTorch (index URL)');
             await enqueueTask('PIP_INSTALL_REQUIREMENTS', {}, 'Install ComfyUI Requirements');
             await enqueueTask('ENABLE_NATIVE_MANAGER', {}, 'Enable Native ComfyUI Manager');
+            if (selectedBundles.length > 0) {
+                await enqueueProvisionBundles(selectedBundles, { showEmptyAlert: false });
+            }
         } catch (e) {
             console.error('Run all enqueue failed', e);
             alert('Failed to queue full setup: ' + e.message);
