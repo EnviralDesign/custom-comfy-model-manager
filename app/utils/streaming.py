@@ -10,7 +10,18 @@ from fastapi import HTTPException, status, Request
 from fastapi.responses import StreamingResponse
 
 
-DEFAULT_STREAM_CHUNK_SIZE = 1024 * 1024  # 1 MiB
+def _env_int(name: str, default: int, minimum: int | None = None) -> int:
+    raw = os.environ.get(name, str(default)).strip()
+    try:
+        value = int(raw)
+    except ValueError:
+        value = default
+    if minimum is not None:
+        value = max(minimum, value)
+    return value
+
+
+DEFAULT_STREAM_CHUNK_SIZE = _env_int("REMOTE_STREAM_CHUNK_MIB", 4, minimum=1) * 1024 * 1024
 
 
 def send_bytes_range_requests(

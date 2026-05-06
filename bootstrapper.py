@@ -39,6 +39,17 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from urllib.parse import urlparse
 
+def env_int(name, default, minimum=None):
+    raw = os.environ.get(name, str(default)).strip()
+    try:
+        value = int(raw)
+    except ValueError:
+        value = default
+    if minimum is not None:
+        value = max(minimum, value)
+    return value
+
+
 # --- CONFIGURATION ---
 BASE_URL = os.environ.get("REMOTE_BASE_URL", "https://dl.enviral-design.com").strip()
 API_KEY = os.environ.get("REMOTE_API_KEY", "PASTE_KEY_HERE").strip()
@@ -55,11 +66,18 @@ EXTRA_PIP_PACKAGES = [p for p in os.environ.get("EXTRA_PIP_PACKAGES", "sageatten
 LIGHTNING_KEEPALIVE = os.environ.get("LIGHTNING_KEEPALIVE", "1").strip().lower() in {"1", "true", "yes", "y"}
 KEEPALIVE_INTERVAL_SECONDS = max(10.0, float(os.environ.get("KEEPALIVE_INTERVAL_SECONDS", "45")))
 KEEPALIVE_BURST_SECONDS = max(0.5, float(os.environ.get("KEEPALIVE_BURST_SECONDS", "3")))
+DOWNLOAD_CHUNK_MIB = env_int("DOWNLOAD_CHUNK_MIB", 1, minimum=1)
+DOWNLOAD_SEGMENTS = env_int("DOWNLOAD_SEGMENTS", 4, minimum=1)
+DOWNLOAD_SEGMENT_MIN_MIB = env_int("DOWNLOAD_SEGMENT_MIN_MIB", 64, minimum=1)
+LOCAL_DOWNLOAD_WORKERS = env_int("LOCAL_DOWNLOAD_WORKERS", 1, minimum=1)
+HF_DOWNLOAD_WORKERS = env_int("HF_DOWNLOAD_WORKERS", 1, minimum=1)
+CIVITAI_DOWNLOAD_WORKERS = env_int("CIVITAI_DOWNLOAD_WORKERS", 1, minimum=1)
+OTHER_DOWNLOAD_WORKERS = env_int("OTHER_DOWNLOAD_WORKERS", 1, minimum=1)
 BASE_HOST = urlparse(BASE_URL).netloc.lower()
 
 # --- CONSTANTS ---
 USER_AGENT = "ComfyRemoteAgent/0.1"
-CHUNK_SIZE = 1024 * 1024  # 1MB chunks
+CHUNK_SIZE = DOWNLOAD_CHUNK_MIB * 1024 * 1024
 STALL_TIMEOUT = 45
 
 # --- SETUP ---
@@ -87,7 +105,7 @@ _keepalive_active = threading.Event()
 
 def log(msg, error=False):
     ts = time.strftime("%H:%M:%S")
-    prefix = "❌" if error else "ℹ️"
+    prefix = "ERR" if error else "INFO"
     print(f"[{ts}] {prefix} {msg}")
 
 def start_lightning_keepalive():
@@ -652,6 +670,145 @@ def handle_install_custom_nodes(task):
 
     update_progress(task["id"], "completed", 1.0, f"Installed {total} custom node pack(s). Restart ComfyUI to load them.")
 
+def parse_content_range_total(value):
+    if not value:
+        return 0
+    match = re.search(r"/(\d+)$", value.strip())
+    if not match:
+        return 0
+    return int(match.group(1))
+
+def probe_range_download(url, headers, should_cancel=None):
+    if DOWNLOAD_SEGMENTS <= 1:
+        return 0
+    if should_cancel and should_cancel():
+        return 0
+
+    probe_headers = dict(headers or {})
+    probe_headers["Range"] = "bytes=0-0"
+    try:
+        with requests.get(url, headers=probe_headers, stream=True, timeout=STALL_TIMEOUT) as r:
+            if r.status_code != 206:
+                return 0
+            total_size = parse_content_range_total(r.headers.get("content-range"))
+            if total_size < DOWNLOAD_SEGMENT_MIN_MIB * 1024 * 1024:
+                return 0
+            return total_size
+    except Exception:
+        return 0
+
+def segmented_range_download(
+    url,
+    dest_path,
+    task_id,
+    total_size,
+    extra_headers=None,
+    should_cancel=None,
+    progress_callback=None,
+):
+    min_segment_bytes = DOWNLOAD_SEGMENT_MIN_MIB * 1024 * 1024
+    segment_count = min(DOWNLOAD_SEGMENTS, max(1, (total_size + min_segment_bytes - 1) // min_segment_bytes))
+    if segment_count <= 1:
+        return False, "segmented download not useful"
+
+    headers_base = dict(extra_headers or {})
+    segment_size = total_size // segment_count
+    segments = []
+    for index in range(segment_count):
+        start = index * segment_size
+        end = total_size - 1 if index == segment_count - 1 else ((index + 1) * segment_size) - 1
+        part_path = Path(f"{dest_path}.seg{index}")
+        segments.append((index, start, end, part_path))
+
+    downloaded_by_segment = [0] * segment_count
+    lock = threading.Lock()
+    last_progress_ts = [0.0]
+
+    for index, start, end, part_path in segments:
+        expected = end - start + 1
+        if part_path.exists():
+            current = part_path.stat().st_size
+            if current > expected:
+                part_path.unlink()
+                current = 0
+            downloaded_by_segment[index] = current
+
+    def report_progress(force=False):
+        now = time.time()
+        with lock:
+            if not force and now - last_progress_ts[0] <= 0.5:
+                return
+            last_progress_ts[0] = now
+            downloaded = sum(downloaded_by_segment)
+        pct = downloaded / total_size if total_size else 0
+        if progress_callback:
+            progress_callback(downloaded, total_size, pct)
+        else:
+            update_progress(task_id, "running", pct, f"Downloading: {int(pct * 100)}%")
+
+    def download_segment(index, start, end, part_path):
+        expected = end - start + 1
+        existing = part_path.stat().st_size if part_path.exists() else 0
+        if existing == expected:
+            report_progress(force=True)
+            return
+        if existing > expected:
+            part_path.unlink()
+            existing = 0
+
+        headers = dict(headers_base)
+        headers["Range"] = f"bytes={start + existing}-{end}"
+        session = requests.Session()
+        session.headers.update({"User-Agent": USER_AGENT})
+        mode = "ab" if existing else "wb"
+
+        with session.get(url, headers=headers, stream=True, timeout=STALL_TIMEOUT) as r:
+            if r.status_code != 206:
+                raise RuntimeError(f"Range request returned HTTP {r.status_code}")
+            with open(part_path, mode) as f:
+                for chunk in r.iter_content(chunk_size=CHUNK_SIZE):
+                    if should_cancel and should_cancel():
+                        raise RuntimeError("cancelled")
+                    if not chunk:
+                        continue
+                    f.write(chunk)
+                    with lock:
+                        downloaded_by_segment[index] += len(chunk)
+                    report_progress()
+
+        if part_path.stat().st_size != expected:
+            raise RuntimeError(f"segment {index + 1}/{segment_count} incomplete")
+
+    log(f"Downloading {dest_path.name} with {segment_count} parallel byte ranges")
+    try:
+        with ThreadPoolExecutor(max_workers=segment_count) as executor:
+            futures = [
+                executor.submit(download_segment, index, start, end, part_path)
+                for index, start, end, part_path in segments
+            ]
+            for future in futures:
+                future.result()
+
+        if should_cancel and should_cancel():
+            return False, "cancelled"
+
+        with open(dest_path, "wb") as out:
+            for _, _, _, part_path in segments:
+                with open(part_path, "rb") as part:
+                    shutil.copyfileobj(part, out, length=CHUNK_SIZE)
+
+        for _, _, _, part_path in segments:
+            try:
+                part_path.unlink()
+            except OSError:
+                pass
+        report_progress(force=True)
+        return True, None
+    except Exception as e:
+        if (should_cancel and should_cancel()) or str(e) == "cancelled":
+            return False, "cancelled"
+        return False, str(e)
+
 def download_from_source(
     url,
     dest_path,
@@ -678,6 +835,22 @@ def download_from_source(
             mode = 'ab'
 
         try:
+            if attempt_existing == 0:
+                range_total_size = probe_range_download(url, headers, should_cancel=should_cancel)
+                if range_total_size:
+                    ok, err = segmented_range_download(
+                        url,
+                        dest_path,
+                        task_id,
+                        range_total_size,
+                        extra_headers=headers,
+                        should_cancel=should_cancel,
+                        progress_callback=progress_callback,
+                    )
+                    if ok or err == "cancelled":
+                        return ok, err
+                    log(f"Segmented download unavailable, falling back to single stream: {err}")
+
             with sess.get(url, headers=headers, stream=True, timeout=STALL_TIMEOUT) as r:
                 # Retry transient upstream server failures
                 if r.status_code >= 500:
@@ -890,6 +1063,8 @@ def handle_download_urls(task):
     lock = threading.Lock()
     done_count = [0]
     active_item_progress = {}
+    active_item_speed = {}
+    item_progress_samples = {}
     cancel_event = threading.Event()
 
     def should_cancel():
@@ -905,6 +1080,8 @@ def handle_download_urls(task):
             items_status[key] = status
             if status in ("completed", "failed", "skipped"):
                 active_item_progress.pop(key, None)
+                active_item_speed.pop(key, None)
+                item_progress_samples.pop(key, None)
             done_count[0] += done_delta
             done = done_count[0]
         progress = done / total_items if total_items else 1.0
@@ -917,7 +1094,23 @@ def handle_download_urls(task):
         )
 
     def update_item_download_progress(key, downloaded, total_size, pct, relpath):
+        now = time.time()
         with lock:
+            previous = item_progress_samples.get(key)
+            bytes_per_second = active_item_speed.get(key)
+            if previous:
+                prev_downloaded, prev_time = previous
+                elapsed = now - prev_time
+                byte_delta = downloaded - prev_downloaded
+                if elapsed > 0 and byte_delta >= 0:
+                    instant_bps = byte_delta / elapsed
+                    bytes_per_second = (
+                        instant_bps
+                        if bytes_per_second is None
+                        else (bytes_per_second * 0.65) + (instant_bps * 0.35)
+                    )
+                    active_item_speed[key] = bytes_per_second
+            item_progress_samples[key] = (downloaded, now)
             active_item_progress[key] = pct
             done = done_count[0]
             active_sum = sum(active_item_progress.values())
@@ -935,6 +1128,7 @@ def handle_download_urls(task):
                         "downloaded": downloaded,
                         "total": total_size,
                         "pct": pct,
+                        "bytes_per_second": bytes_per_second,
                     }
                 },
                 "items_done": done,
@@ -1039,7 +1233,27 @@ def handle_download_urls(task):
                 log(f"Failed to download {relpath}: {err}", error=True)
                 update_item(item_key, "failed", f"Failed: {relpath}", done_delta=1)
 
-    active_queues = [(provider, items) for provider, items in queues.items() if items]
+    provider_worker_limits = {
+        "local": LOCAL_DOWNLOAD_WORKERS,
+        "huggingface": HF_DOWNLOAD_WORKERS,
+        "civitai": CIVITAI_DOWNLOAD_WORKERS,
+        "other": OTHER_DOWNLOAD_WORKERS,
+    }
+
+    def split_provider_queue(provider, items):
+        if not items:
+            return []
+        worker_limit = provider_worker_limits.get(provider, 1)
+        worker_count = min(worker_limit, len(items))
+        return [
+            (provider, items[index::worker_count])
+            for index in range(worker_count)
+            if items[index::worker_count]
+        ]
+
+    active_queues = []
+    for provider, items in queues.items():
+        active_queues.extend(split_provider_queue(provider, items))
     if active_queues:
         with ThreadPoolExecutor(max_workers=len(active_queues)) as executor:
             futures = [executor.submit(worker, provider, items) for provider, items in active_queues]

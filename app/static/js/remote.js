@@ -498,6 +498,10 @@ document.addEventListener('DOMContentLoaded', () => {
             const byteText = itemProgress
                 ? formatBytes(itemProgress.downloaded || 0) + (itemProgress.total ? ` / ${formatBytes(itemProgress.total)}` : '')
                 : '';
+            const speedText = itemProgress && itemProgress.bytes_per_second
+                ? `${formatSpeed(itemProgress.bytes_per_second)}`
+                : '';
+            const detailText = [byteText, speedText].filter(Boolean).join(' • ');
             const statusText = progressPct !== null && status === 'downloading'
                 ? `${progressPct.toFixed(0)}%`
                 : status;
@@ -517,7 +521,7 @@ document.addEventListener('DOMContentLoaded', () => {
                         <span class="source-badge ${providerClassFor(provider)}">${providerLabel}</span>
                         <span class="download-item-status ${statusClass}">${statusText}</span>
                     </div>
-                    ${byteText ? `<div class="download-item-bytes">${byteText}</div>` : ''}
+                    ${detailText ? `<div class="download-item-bytes">${detailText}</div>` : ''}
                 </div>
             </div>
             `;
@@ -542,6 +546,10 @@ document.addEventListener('DOMContentLoaded', () => {
         const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
         const i = Math.min(Math.floor(Math.log(bytes) / Math.log(k)), sizes.length - 1);
         return `${(bytes / Math.pow(k, i)).toFixed(i === 0 ? 0 : 1)} ${sizes[i]}`;
+    }
+
+    function formatSpeed(bytesPerSecond) {
+        return `${formatBytes(bytesPerSecond)}/s`;
     }
 
     function replaceHtmlPreservingScroll(container, html, scrollSelector) {

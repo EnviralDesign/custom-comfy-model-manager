@@ -89,6 +89,24 @@ files, and finally heavier model files. Local model/input/workflow files are
 streamed through the manager using the session bearer token; public source URLs
 are used when available.
 
+Local transfer tuning:
+
+```
+REMOTE_STREAM_CHUNK_MIB=4     # home app file-stream read size
+DOWNLOAD_CHUNK_MIB=1          # bootstrapper read/write chunk size for responsiveness
+DOWNLOAD_SEGMENTS=4           # parallel byte ranges for one large file, when supported
+DOWNLOAD_SEGMENT_MIN_MIB=64   # only segment files at least this large
+LOCAL_DOWNLOAD_WORKERS=1      # parallel local files; keep 1 for max per-file clarity
+HF_DOWNLOAD_WORKERS=1         # parallel Hugging Face files; keep 1 for max per-file clarity
+CIVITAI_DOWNLOAD_WORKERS=1    # parallel Civitai files; keep 1 for max per-file clarity
+OTHER_DOWNLOAD_WORKERS=1      # parallel generic URL files; keep 1 for max per-file clarity
+```
+
+The default path favors single-file throughput and readable progress. For large
+files from sources that support HTTP Range, the bootstrapper downloads multiple
+byte ranges concurrently and assembles them locally. Raise the worker counts only
+when you want higher aggregate batch throughput across several files.
+
 ## Tech Stack
 
 - **Backend:** FastAPI + Uvicorn
