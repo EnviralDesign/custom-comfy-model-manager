@@ -10,9 +10,16 @@ ComfyUI Remote Bootstrapper
 ---------------------------
 Run this on your remote Ubuntu/WSL machine to connect it to your home ComfyUI Model Manager.
 
-Usage: 
-  Edit BASE_URL and API_KEY.
-  Run with uv: `uv run bootstrapper.py`
+Usage:
+  Interactive:
+    uv run bootstrapper.py
+
+  Disable Lightning Studio keep-awake:
+    LIGHTNING_KEEPALIVE=0 uv run bootstrapper.py
+
+  Non-interactive / Lightning Job:
+    REMOTE_BASE_URL=https://example.com REMOTE_API_KEY=... COMFY_DIR=ComfyUI \
+      PROMPT_OPTIONAL_KEYS=0 CREATE_COMFY_DIR=1 uv run bootstrapper.py
 
 
 """
@@ -32,18 +39,22 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from urllib.parse import urlparse
 
-# --- CONFIGURATION (Paste from UI) ---
-BASE_URL = "https://dl.enviral-design.com"  # Set to your home app URL
-API_KEY = "PASTE_KEY_HERE"          # Set to your session key
+# --- CONFIGURATION ---
+BASE_URL = os.environ.get("REMOTE_BASE_URL", "https://dl.enviral-design.com").strip()
+API_KEY = os.environ.get("REMOTE_API_KEY", "PASTE_KEY_HERE").strip()
 HF_API_KEY = os.environ.get("HF_API_KEY", "").strip()
 CIVITAI_API_KEY = os.environ.get("CIVITAI_API_KEY", "").strip()
 PROMPT_OPTIONAL_KEYS = os.environ.get("PROMPT_OPTIONAL_KEYS", "1").strip().lower() in {"1", "true", "yes", "y"}
+CREATE_COMFY_DIR = os.environ.get("CREATE_COMFY_DIR", "0").strip().lower() in {"1", "true", "yes", "y"}
 TORCH_INDEX_URL = os.environ.get("TORCH_INDEX_URL", "").strip()
 TORCH_INDEX_FLAG = os.environ.get("TORCH_INDEX_FLAG", "--extra-index-url").strip()
 TORCH_PACKAGES = os.environ.get("TORCH_PACKAGES", "torch torchvision torchaudio").split()
 DOWNLOAD_MAX_RETRIES = max(1, int(os.environ.get("DOWNLOAD_MAX_RETRIES", "3")))
 DOWNLOAD_RETRY_BACKOFF_SECONDS = max(0.0, float(os.environ.get("DOWNLOAD_RETRY_BACKOFF_SECONDS", "2")))
 EXTRA_PIP_PACKAGES = [p for p in os.environ.get("EXTRA_PIP_PACKAGES", "sageattention").split() if p]
+LIGHTNING_KEEPALIVE = os.environ.get("LIGHTNING_KEEPALIVE", "1").strip().lower() in {"1", "true", "yes", "y"}
+KEEPALIVE_INTERVAL_SECONDS = max(10.0, float(os.environ.get("KEEPALIVE_INTERVAL_SECONDS", "45")))
+KEEPALIVE_BURST_SECONDS = max(0.5, float(os.environ.get("KEEPALIVE_BURST_SECONDS", "3")))
 BASE_HOST = urlparse(BASE_URL).netloc.lower()
 
 # --- CONSTANTS ---
@@ -72,11 +83,31 @@ download_session.headers.update({
 })
 
 _api_lock = threading.Lock()
+_keepalive_active = threading.Event()
 
 def log(msg, error=False):
     ts = time.strftime("%H:%M:%S")
     prefix = "❌" if error else "ℹ️"
     print(f"[{ts}] {prefix} {msg}")
+
+def start_lightning_keepalive():
+    if not LIGHTNING_KEEPALIVE:
+        return
+
+    def loop():
+        log(
+            "Lightning keep-awake enabled for active tasks "
+            f"({KEEPALIVE_BURST_SECONDS:g}s CPU burst every {KEEPALIVE_INTERVAL_SECONDS:g}s)."
+        )
+        digest = b"comfy-remote-keepalive"
+        while True:
+            if _keepalive_active.wait(timeout=KEEPALIVE_INTERVAL_SECONDS):
+                end_at = time.time() + KEEPALIVE_BURST_SECONDS
+                while time.time() < end_at and _keepalive_active.is_set():
+                    digest = hashlib.sha256(digest).digest()
+                print(".", end="", flush=True)
+
+    threading.Thread(target=loop, name="lightning-keepalive", daemon=True).start()
 
 def set_comfy_dir(path: str):
     global COMFY_DIR, MODELS_DIR
@@ -1069,17 +1100,21 @@ def main():
 
     expanded = Path(os.path.expanduser(comfy_path)).resolve()
     if not expanded.exists():
-        try:
-            resp = input(f"Path does not exist. Create it? [y/N]: ").strip().lower()
-        except KeyboardInterrupt:
-            return
-        if resp != "y":
-            print("ComfyUI path not created. Exiting.")
-            return
+        if CREATE_COMFY_DIR:
+            print(f"Creating ComfyUI path: {expanded}")
+        else:
+            try:
+                resp = input(f"Path does not exist. Create it? [y/N]: ").strip().lower()
+            except KeyboardInterrupt:
+                return
+            if resp != "y":
+                print("ComfyUI path not created. Exiting.")
+                return
         expanded.mkdir(parents=True, exist_ok=True)
 
     set_comfy_dir(str(expanded))
 
+    start_lightning_keepalive()
     register_agent()
     fetch_remote_provider_keys()
 
@@ -1111,26 +1146,30 @@ def main():
             task = get_next_task()
             if task:
                 log(f"Received Task: {task['type']} ({task['id']})")
-                
-                if task['type'] == 'COMFY_GIT_CLONE':
-                    handle_git_clone(task)
-                elif task['type'] == 'CREATE_VENV':
-                    handle_create_venv(task)
-                elif task['type'] == 'ASSET_DOWNLOAD':
-                    handle_download(task)
-                elif task['type'] == 'DOWNLOAD_URLS':
-                    handle_download_urls(task)
-                elif task['type'] == 'PIP_INSTALL_TORCH':
-                    handle_install_torch(task)
-                elif task['type'] == 'PIP_INSTALL_REQUIREMENTS':
-                    handle_install_requirements(task)
-                elif task['type'] in ('INSTALL_COMFYUI_MANAGER', 'ENABLE_NATIVE_MANAGER'):
-                    handle_install_manager(task)
-                elif task['type'] == 'INSTALL_CUSTOM_NODES':
-                    handle_install_custom_nodes(task)
-                else:
-                    log(f"Unknown task type: {task['type']}")
-                    update_progress(task['id'], "failed", error="Unknown task type")
+
+                _keepalive_active.set()
+                try:
+                    if task['type'] == 'COMFY_GIT_CLONE':
+                        handle_git_clone(task)
+                    elif task['type'] == 'CREATE_VENV':
+                        handle_create_venv(task)
+                    elif task['type'] == 'ASSET_DOWNLOAD':
+                        handle_download(task)
+                    elif task['type'] == 'DOWNLOAD_URLS':
+                        handle_download_urls(task)
+                    elif task['type'] == 'PIP_INSTALL_TORCH':
+                        handle_install_torch(task)
+                    elif task['type'] == 'PIP_INSTALL_REQUIREMENTS':
+                        handle_install_requirements(task)
+                    elif task['type'] in ('INSTALL_COMFYUI_MANAGER', 'ENABLE_NATIVE_MANAGER'):
+                        handle_install_manager(task)
+                    elif task['type'] == 'INSTALL_CUSTOM_NODES':
+                        handle_install_custom_nodes(task)
+                    else:
+                        log(f"Unknown task type: {task['type']}")
+                        update_progress(task['id'], "failed", error="Unknown task type")
+                finally:
+                    _keepalive_active.clear()
             
             if not task:
                 time.sleep(1) # Backup sleep if long poll returns fast
