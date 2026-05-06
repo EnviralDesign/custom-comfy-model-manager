@@ -18,6 +18,10 @@ const App = {
 
     // WebSocket for real-time updates
     connectWebSocket() {
+        if (this.ws && (this.ws.readyState === WebSocket.OPEN || this.ws.readyState === WebSocket.CONNECTING)) {
+            return;
+        }
+
         const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
         const wsUrl = `${protocol}//${window.location.host}/ws`;
 
@@ -35,8 +39,15 @@ const App = {
 
         this.ws.onclose = () => {
             console.log('WebSocket disconnected, reconnecting...');
+            this.ws = null;
             setTimeout(() => this.connectWebSocket(), this.wsReconnectMs);
             this.wsReconnectMs = Math.min(this.wsReconnectMs * 2, 30000);
+        };
+
+        this.ws.onerror = () => {
+            if (this.ws) {
+                this.ws.close();
+            }
         };
     },
 

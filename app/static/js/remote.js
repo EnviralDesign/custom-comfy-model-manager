@@ -388,7 +388,7 @@ document.addEventListener('DOMContentLoaded', () => {
             }
         });
         if (els.stepDownloadItems) {
-            els.stepDownloadItems.innerHTML = '';
+            replaceHtmlPreservingScroll(els.stepDownloadItems, '', '.download-items');
         }
         if (els.btnCancelProvision) {
             els.btnCancelProvision.disabled = true;
@@ -412,7 +412,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 elsForStep.detail.textContent = '';
                 elsForStep.error.textContent = '';
                 if (type === 'DOWNLOAD_URLS' && els.stepDownloadItems) {
-                    els.stepDownloadItems.innerHTML = '';
+                    replaceHtmlPreservingScroll(els.stepDownloadItems, '', '.download-items');
                 }
                 return;
             }
@@ -424,7 +424,7 @@ document.addEventListener('DOMContentLoaded', () => {
             elsForStep.error.textContent = t.error || '';
 
             if (type === 'DOWNLOAD_URLS' && els.stepDownloadItems) {
-                els.stepDownloadItems.innerHTML = renderDownloadItems(t);
+                replaceHtmlPreservingScroll(els.stepDownloadItems, renderDownloadItems(t), '.download-items');
             }
         });
 
@@ -439,6 +439,7 @@ document.addEventListener('DOMContentLoaded', () => {
         if (items.length === 0) return '';
 
         const statusMap = (task.meta && task.meta.items_status) || {};
+        const progressMap = (task.meta && task.meta.items_progress) || {};
         let doneCount = 0;
         const activeCounts = {};
 
@@ -454,6 +455,7 @@ document.addEventListener('DOMContentLoaded', () => {
             if (status === 'downloading') {
                 activeCounts[provider] = (activeCounts[provider] || 0) + 1;
             }
+            const itemProgress = progressMap[itemKey] || progressMap[relpath] || progressMap[item.url] || null;
 
             let statusClass = 'text-secondary';
             if (status === 'downloading') statusClass = 'text-primary';
@@ -462,13 +464,32 @@ document.addEventListener('DOMContentLoaded', () => {
             if (status === 'failed') statusClass = 'text-danger';
 
             const providerLabel = providerLabelFor(provider);
+            const progressPct = itemProgress && Number.isFinite(itemProgress.pct)
+                ? Math.max(0, Math.min(100, itemProgress.pct * 100))
+                : null;
+            const byteText = itemProgress
+                ? formatBytes(itemProgress.downloaded || 0) + (itemProgress.total ? ` / ${formatBytes(itemProgress.total)}` : '')
+                : '';
+            const statusText = progressPct !== null && status === 'downloading'
+                ? `${progressPct.toFixed(0)}%`
+                : status;
 
             return `
             <div class="download-item">
-                <div class="download-item-path" title="${rootType}/${relpath}">${rootType}/${relpath}</div>
-                <div style="display:flex; align-items:center; gap:6px;">
-                    <span class="source-badge ${providerClassFor(provider)}">${providerLabel}</span>
-                    <span class="download-item-status ${statusClass}">${status}</span>
+                <div class="download-item-main">
+                    <div class="download-item-path" title="${rootType}/${relpath}">${rootType}/${relpath}</div>
+                    ${progressPct !== null ? `
+                        <div class="download-progress">
+                            <div class="download-progress-bar" style="width:${progressPct}%"></div>
+                        </div>
+                    ` : ''}
+                </div>
+                <div class="download-item-side">
+                    <div style="display:flex; align-items:center; gap:6px; justify-content:flex-end;">
+                        <span class="source-badge ${providerClassFor(provider)}">${providerLabel}</span>
+                        <span class="download-item-status ${statusClass}">${statusText}</span>
+                    </div>
+                    ${byteText ? `<div class="download-item-bytes">${byteText}</div>` : ''}
                 </div>
             </div>
             `;
@@ -485,6 +506,35 @@ document.addEventListener('DOMContentLoaded', () => {
                 ${rows}
             </div>
         `;
+    }
+
+    function formatBytes(bytes) {
+        if (!bytes) return '0 B';
+        const k = 1024;
+        const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
+        const i = Math.min(Math.floor(Math.log(bytes) / Math.log(k)), sizes.length - 1);
+        return `${(bytes / Math.pow(k, i)).toFixed(i === 0 ? 0 : 1)} ${sizes[i]}`;
+    }
+
+    function replaceHtmlPreservingScroll(container, html, scrollSelector) {
+        if (!container || container._lastRenderedHtml === html) return;
+
+        const nestedScroller = scrollSelector ? container.querySelector(scrollSelector) : null;
+        const nestedScrollTop = nestedScroller ? nestedScroller.scrollTop : 0;
+        const pageScrollX = window.scrollX;
+        const pageScrollY = window.scrollY;
+
+        container.innerHTML = html;
+        container._lastRenderedHtml = html;
+
+        const nextNestedScroller = scrollSelector ? container.querySelector(scrollSelector) : null;
+        if (nextNestedScroller) {
+            nextNestedScroller.scrollTop = nestedScrollTop;
+        }
+
+        if (window.scrollX !== pageScrollX || window.scrollY !== pageScrollY) {
+            window.scrollTo(pageScrollX, pageScrollY);
+        }
     }
 
     function providerFromUrl(url) {
@@ -626,11 +676,11 @@ document.addEventListener('DOMContentLoaded', () => {
     fetchTasks();
     loadBundles();
 
-    // Polling (every 2s is enough for status)
+    // Polling fast enough to show bootstrapper byte-level progress.
     pollInterval = setInterval(() => {
         fetchStatus();
         fetchTasks();
-    }, 2000);
+    }, 750);
 
     // Countdown ticker (every 1s)
     setInterval(updateCountdown, 1000);

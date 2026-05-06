@@ -621,7 +621,16 @@ def handle_install_custom_nodes(task):
 
     update_progress(task["id"], "completed", 1.0, f"Installed {total} custom node pack(s). Restart ComfyUI to load them.")
 
-def download_from_source(url, dest_path, task_id, existing_size=0, extra_headers=None, session=None, should_cancel=None):
+def download_from_source(
+    url,
+    dest_path,
+    task_id,
+    existing_size=0,
+    extra_headers=None,
+    session=None,
+    should_cancel=None,
+    progress_callback=None,
+):
     sess = session or download_session
     attempt = 0
     while attempt < DOWNLOAD_MAX_RETRIES:
@@ -678,12 +687,19 @@ def download_from_source(url, dest_path, task_id, existing_size=0, extra_headers
                             f.write(chunk)
                             downloaded += len(chunk)
 
-                            # Throttle updates to ~1s
+                            # Throttle updates to keep the UI responsive without hammering the controller.
                             now = time.time()
-                            if now - last_update > 1.0:
+                            if now - last_update > 0.5:
                                 pct = downloaded / total_size if total_size else 0
-                                update_progress(task_id, "running", pct, f"Downloading: {int(pct*100)}%")
+                                if progress_callback:
+                                    progress_callback(downloaded, total_size, pct)
+                                else:
+                                    update_progress(task_id, "running", pct, f"Downloading: {int(pct*100)}%")
                                 last_update = now
+
+                if progress_callback:
+                    pct = downloaded / total_size if total_size else 1.0
+                    progress_callback(downloaded, total_size, pct)
 
                 return True, None
         except Exception as e:
@@ -842,6 +858,7 @@ def handle_download_urls(task):
 
     lock = threading.Lock()
     done_count = [0]
+    active_item_progress = {}
     cancel_event = threading.Event()
 
     def should_cancel():
@@ -855,6 +872,8 @@ def handle_download_urls(task):
     def update_item(key, status, message=None, done_delta=0):
         with lock:
             items_status[key] = status
+            if status in ("completed", "failed", "skipped"):
+                active_item_progress.pop(key, None)
             done_count[0] += done_delta
             done = done_count[0]
         progress = done / total_items if total_items else 1.0
@@ -864,6 +883,31 @@ def handle_download_urls(task):
             progress,
             message,
             meta={"items_status": {key: status}, "items_done": done}
+        )
+
+    def update_item_download_progress(key, downloaded, total_size, pct, relpath):
+        with lock:
+            active_item_progress[key] = pct
+            done = done_count[0]
+            active_sum = sum(active_item_progress.values())
+        progress = min(1.0, (done + active_sum) / total_items) if total_items else 1.0
+        percent_label = f"{int(pct * 100)}%" if total_size else f"{downloaded} bytes"
+        update_progress(
+            task['id'],
+            "running",
+            progress,
+            f"Downloading: {relpath} ({percent_label})",
+            meta={
+                "items_status": {key: "downloading"},
+                "items_progress": {
+                    key: {
+                        "downloaded": downloaded,
+                        "total": total_size,
+                        "pct": pct,
+                    }
+                },
+                "items_done": done,
+            }
         )
 
     def sort_items(items_list, ascending=True):
@@ -944,6 +988,13 @@ def handle_download_urls(task):
                 extra_headers=headers,
                 session=session,
                 should_cancel=should_cancel,
+                progress_callback=lambda downloaded, total_size, pct, key=item_key, path=relpath: update_item_download_progress(
+                    key,
+                    downloaded,
+                    total_size,
+                    pct,
+                    path,
+                ),
             )
 
             if ok:

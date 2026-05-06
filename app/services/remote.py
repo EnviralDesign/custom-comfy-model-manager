@@ -243,13 +243,13 @@ class RemoteSessionManager:
                     if t.meta is None:
                         t.meta = {}
                     for key, value in update.meta.items():
-                        if key == "items_status" and isinstance(value, dict):
-                            existing = t.meta.get("items_status")
+                        if key in ("items_status", "items_progress") and isinstance(value, dict):
+                            existing = t.meta.get(key)
                             if isinstance(existing, dict):
                                 existing.update(value)
-                                t.meta["items_status"] = existing
+                                t.meta[key] = existing
                             else:
-                                t.meta["items_status"] = value
+                                t.meta[key] = value
                         else:
                             t.meta[key] = value
                 
