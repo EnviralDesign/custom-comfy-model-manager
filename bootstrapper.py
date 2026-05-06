@@ -62,13 +62,18 @@ TORCH_INDEX_FLAG = os.environ.get("TORCH_INDEX_FLAG", "--extra-index-url").strip
 TORCH_PACKAGES = os.environ.get("TORCH_PACKAGES", "torch torchvision torchaudio").split()
 DOWNLOAD_MAX_RETRIES = max(1, int(os.environ.get("DOWNLOAD_MAX_RETRIES", "3")))
 DOWNLOAD_RETRY_BACKOFF_SECONDS = max(0.0, float(os.environ.get("DOWNLOAD_RETRY_BACKOFF_SECONDS", "2")))
-EXTRA_PIP_PACKAGES = [p for p in os.environ.get("EXTRA_PIP_PACKAGES", "sageattention").split() if p]
+EXTRA_PIP_PACKAGES = [p for p in os.environ.get("EXTRA_PIP_PACKAGES", "sageattention triton").split() if p]
+OPTIONAL_PIP_PACKAGES = [p for p in os.environ.get("OPTIONAL_PIP_PACKAGES", "flash-attn").split() if p]
+TRANSFORMERS_COMPAT_PIN = os.environ.get("TRANSFORMERS_COMPAT_PIN", "transformers<5").strip()
 LIGHTNING_KEEPALIVE = os.environ.get("LIGHTNING_KEEPALIVE", "1").strip().lower() in {"1", "true", "yes", "y"}
 KEEPALIVE_INTERVAL_SECONDS = max(10.0, float(os.environ.get("KEEPALIVE_INTERVAL_SECONDS", "45")))
 KEEPALIVE_BURST_SECONDS = max(0.5, float(os.environ.get("KEEPALIVE_BURST_SECONDS", "3")))
 DOWNLOAD_CHUNK_MIB = env_int("DOWNLOAD_CHUNK_MIB", 1, minimum=1)
+PROGRESS_UPDATE_INTERVAL_SECONDS = max(0.1, float(os.environ.get("PROGRESS_UPDATE_INTERVAL_SECONDS", "0.25")))
+PROGRESS_POST_TIMEOUT_SECONDS = max(1.0, float(os.environ.get("PROGRESS_POST_TIMEOUT_SECONDS", "5")))
 DOWNLOAD_SEGMENTS = env_int("DOWNLOAD_SEGMENTS", 4, minimum=1)
 DOWNLOAD_SEGMENT_MIN_MIB = env_int("DOWNLOAD_SEGMENT_MIN_MIB", 64, minimum=1)
+DOWNLOAD_BATCH_WORKERS = env_int("DOWNLOAD_BATCH_WORKERS", 3, minimum=1)
 LOCAL_DOWNLOAD_WORKERS = env_int("LOCAL_DOWNLOAD_WORKERS", 1, minimum=1)
 HF_DOWNLOAD_WORKERS = env_int("HF_DOWNLOAD_WORKERS", 1, minimum=1)
 CIVITAI_DOWNLOAD_WORKERS = env_int("CIVITAI_DOWNLOAD_WORKERS", 1, minimum=1)
@@ -89,6 +94,11 @@ DEFAULT_COMFY_DIR = "ComfyUI"
 # --- IMPORTS ---
 import requests
 
+# Lightning workspaces can use overlay/symlinked filesystems and preloaded user
+# site packages. Prefer real venv files and isolate from ambient user packages.
+os.environ.setdefault("UV_LINK_MODE", "copy")
+os.environ.setdefault("PYTHONNOUSERSITE", "1")
+
 api_session = requests.Session()
 api_session.headers.update({
     "Authorization": f"Bearer {API_KEY}",
@@ -102,6 +112,11 @@ download_session.headers.update({
 
 _api_lock = threading.Lock()
 _keepalive_active = threading.Event()
+_progress_lock = threading.Lock()
+_progress_event = threading.Event()
+_progress_pending = {}
+_progress_terminal_tasks = set()
+_progress_reporter_started = False
 
 def log(msg, error=False):
     ts = time.strftime("%H:%M:%S")
@@ -119,11 +134,16 @@ def start_lightning_keepalive():
         )
         digest = b"comfy-remote-keepalive"
         while True:
-            if _keepalive_active.wait(timeout=KEEPALIVE_INTERVAL_SECONDS):
+            _keepalive_active.wait()
+            while _keepalive_active.is_set():
                 end_at = time.time() + KEEPALIVE_BURST_SECONDS
                 while time.time() < end_at and _keepalive_active.is_set():
                     digest = hashlib.sha256(digest).digest()
                 print(".", end="", flush=True)
+
+                next_burst_at = time.time() + KEEPALIVE_INTERVAL_SECONDS
+                while time.time() < next_burst_at and _keepalive_active.is_set():
+                    time.sleep(min(1.0, next_burst_at - time.time()))
 
     threading.Thread(target=loop, name="lightning-keepalive", daemon=True).start()
 
@@ -211,18 +231,61 @@ def get_next_task():
         log(f"Polling error: {e}", error=True)
         return None
 
+def post_progress_payload(payload):
+    if payload.get("status") == "running":
+        with _progress_lock:
+            if payload.get("task_id") in _progress_terminal_tasks:
+                return
+    try:
+        with _api_lock:
+            api_session.post(
+                f"{BASE_URL}/api/remote/tasks/progress",
+                json=payload,
+                timeout=PROGRESS_POST_TIMEOUT_SECONDS,
+            )
+    except Exception:
+        pass
+
+def start_progress_reporter():
+    global _progress_reporter_started
+    if _progress_reporter_started:
+        return
+    _progress_reporter_started = True
+
+    def loop():
+        while True:
+            _progress_event.wait(timeout=PROGRESS_UPDATE_INTERVAL_SECONDS)
+            _progress_event.clear()
+            with _progress_lock:
+                pending = list(_progress_pending.values())
+                _progress_pending.clear()
+            for payload in pending:
+                post_progress_payload(payload)
+
+    threading.Thread(target=loop, name="progress-reporter", daemon=True).start()
+
 def update_progress(task_id, status, progress=None, message=None, error=None, meta=None):
     payload = {"task_id": task_id, "status": status}
     if progress is not None: payload["progress"] = progress
     if message: payload["message"] = message
     if error: payload["error"] = error
     if meta: payload["meta"] = meta
-    
-    try:
-        with _api_lock:
-            api_session.post(f"{BASE_URL}/api/remote/tasks/progress", json=payload)
-    except:
-        pass
+
+    if status == "running":
+        start_progress_reporter()
+        with _progress_lock:
+            if task_id in _progress_terminal_tasks:
+                return
+            _progress_pending[task_id] = payload
+        _progress_event.set()
+        return
+
+    if status in {"completed", "failed", "cancelled"}:
+        with _progress_lock:
+            _progress_terminal_tasks.add(task_id)
+            _progress_pending.pop(task_id, None)
+
+    post_progress_payload(payload)
 
 def is_task_cancelled(task_id: str) -> bool:
     try:
@@ -234,6 +297,28 @@ def is_task_cancelled(task_id: str) -> bool:
         return data.get("status") == "cancelled"
     except Exception:
         return False
+
+def make_cancel_checker(task_id: str, interval_seconds: float = 2.0):
+    cancel_event = threading.Event()
+    lock = threading.Lock()
+    last_check = [0.0]
+
+    def should_cancel():
+        if cancel_event.is_set():
+            return True
+
+        now = time.time()
+        with lock:
+            if now - last_check[0] < interval_seconds:
+                return cancel_event.is_set()
+            last_check[0] = now
+
+        if is_task_cancelled(task_id):
+            cancel_event.set()
+            return True
+        return False
+
+    return should_cancel, cancel_event
 
 # --- HELPERS ---
 
@@ -319,6 +404,31 @@ def ensure_pip(task_id) -> tuple[bool, str]:
             return True, ""
 
     return False, err or "pip bootstrap failed."
+
+def package_to_import_name(spec: str) -> str:
+    # Strip version/extra markers from package spec; fallback dash->underscore.
+    base = re.split(r"[<>=!~\[\]]", spec, maxsplit=1)[0].strip()
+    if not base:
+        return spec.replace("-", "_")
+    return base.replace("-", "_")
+
+def install_optional_package(venv_python: Path, package: str) -> bool:
+    attempts = [
+        [str(venv_python), "-m", "pip", "install", "-U", package],
+    ]
+    package_name = package_to_import_name(package).lower()
+    if package_name == "flash_attn":
+        attempts.append([str(venv_python), "-m", "pip", "install", "-U", package, "--no-build-isolation"])
+
+    last_err = ""
+    for cmd in attempts:
+        rc, _, err = run_cmd(cmd, cwd=COMFY_DIR)
+        if rc == 0:
+            return True
+        last_err = err
+
+    log(f"Optional package install failed for {package}: {last_err}", error=True)
+    return False
 
 # --- TASK HANDLERS ---
 
@@ -481,13 +591,6 @@ def handle_install_requirements(task):
             update_progress(task['id'], "failed", 0.0, "Extra dependency install failed", error=err)
             return
 
-        def package_to_import_name(spec: str) -> str:
-            # Strip version/extra markers from package spec; fallback dash->underscore.
-            base = re.split(r"[<>=!~\[\]]", spec, maxsplit=1)[0].strip()
-            if not base:
-                return spec.replace("-", "_")
-            return base.replace("-", "_")
-
         imports_to_verify = [package_to_import_name(p) for p in EXTRA_PIP_PACKAGES]
         update_progress(task['id'], "running", 0.9, f"Verifying imports: {' '.join(imports_to_verify)}")
         for mod in imports_to_verify:
@@ -496,6 +599,15 @@ def handle_install_requirements(task):
             if rc != 0:
                 update_progress(task['id'], "failed", 0.0, f"Import check failed: {mod}", error=err)
                 return
+
+    if OPTIONAL_PIP_PACKAGES:
+        optional_label = " ".join(OPTIONAL_PIP_PACKAGES)
+        update_progress(task['id'], "running", 0.93, f"Attempting optional acceleration dependencies: {optional_label}")
+        for package in OPTIONAL_PIP_PACKAGES:
+            install_optional_package(venv_python, package)
+
+    if not apply_dependency_compatibility_fixes(task['id'], 0.95):
+        return
 
     update_progress(task['id'], "completed", 1.0, "Requirements installed; launch ComfyUI with --enable-manager")
 
@@ -586,6 +698,49 @@ def safe_custom_node_dir_name(value: str) -> str:
     value = re.sub(r"[^A-Za-z0-9_.-]+", "-", value).strip(".-")
     return value or "custom-node"
 
+def apply_dependency_compatibility_fixes(task_id, progress=0.95):
+    """Apply narrow dependency remediations for known Comfy/custom-node import traps."""
+    if not TRANSFORMERS_COMPAT_PIN:
+        return True
+
+    venv_python = get_venv_python()
+    if not venv_python.exists():
+        update_progress(task_id, "failed", progress, "Venv not found for dependency compatibility check.")
+        return False
+
+    check_code = r"""
+try:
+    from transformers.utils.import_utils import is_flash_attn_2_available
+except Exception:
+    raise SystemExit(0)
+try:
+    is_flash_attn_2_available()
+except KeyError as exc:
+    if str(exc).strip("'\"") == "flash_attn":
+        raise SystemExit(42)
+    raise
+"""
+    rc, _, err = run_cmd([str(venv_python), "-c", check_code], cwd=COMFY_DIR)
+    if rc == 0:
+        return True
+    if rc != 42:
+        log(f"Transformers compatibility probe failed without known flash_attn bug: {err}", error=True)
+        return True
+
+    update_progress(task_id, "running", progress, f"Applying compatibility pin: {TRANSFORMERS_COMPAT_PIN}")
+    rc, _, install_err = run_cmd([str(venv_python), "-m", "pip", "install", TRANSFORMERS_COMPAT_PIN], cwd=COMFY_DIR)
+    if rc != 0:
+        update_progress(task_id, "failed", progress, f"Failed to apply compatibility pin: {TRANSFORMERS_COMPAT_PIN}", error=install_err)
+        return False
+
+    rc, _, verify_err = run_cmd([str(venv_python), "-c", check_code], cwd=COMFY_DIR)
+    if rc != 0:
+        update_progress(task_id, "failed", progress, "Transformers compatibility check still fails after pin.", error=verify_err)
+        return False
+
+    log(f"Applied compatibility pin: {TRANSFORMERS_COMPAT_PIN}")
+    return True
+
 def handle_install_custom_nodes(task):
     payload = task.get("payload", {})
     nodes = payload.get("nodes") or []
@@ -668,6 +823,9 @@ def handle_install_custom_nodes(task):
 
         update_progress(task["id"], "running", progress_done, f"Installed custom node: {name}")
 
+    if not apply_dependency_compatibility_fixes(task["id"], 0.98):
+        return
+
     update_progress(task["id"], "completed", 1.0, f"Installed {total} custom node pack(s). Restart ComfyUI to load them.")
 
 def parse_content_range_total(value):
@@ -689,12 +847,15 @@ def probe_range_download(url, headers, should_cancel=None):
     try:
         with requests.get(url, headers=probe_headers, stream=True, timeout=STALL_TIMEOUT) as r:
             if r.status_code != 206:
+                log(f"Range probe returned HTTP {r.status_code}; using single-stream fallback.")
                 return 0
             total_size = parse_content_range_total(r.headers.get("content-range"))
             if total_size < DOWNLOAD_SEGMENT_MIN_MIB * 1024 * 1024:
+                log(f"Range supported, but file is below {DOWNLOAD_SEGMENT_MIN_MIB} MiB segment threshold.")
                 return 0
             return total_size
-    except Exception:
+    except Exception as e:
+        log(f"Range probe failed; using single-stream fallback: {e}")
         return 0
 
 def segmented_range_download(
@@ -736,7 +897,7 @@ def segmented_range_download(
     def report_progress(force=False):
         now = time.time()
         with lock:
-            if not force and now - last_progress_ts[0] <= 0.5:
+            if not force and now - last_progress_ts[0] <= PROGRESS_UPDATE_INTERVAL_SECONDS:
                 return
             last_progress_ts[0] = now
             downloaded = sum(downloaded_by_segment)
@@ -835,8 +996,10 @@ def download_from_source(
             mode = 'ab'
 
         try:
+            range_total_size = 0
             if attempt_existing == 0:
                 range_total_size = probe_range_download(url, headers, should_cancel=should_cancel)
+
                 if range_total_size:
                     ok, err = segmented_range_download(
                         url,
@@ -893,7 +1056,7 @@ def download_from_source(
 
                             # Throttle updates to keep the UI responsive without hammering the controller.
                             now = time.time()
-                            if now - last_update > 0.5:
+                            if now - last_update > PROGRESS_UPDATE_INTERVAL_SECONDS:
                                 pct = downloaded / total_size if total_size else 0
                                 if progress_callback:
                                     progress_callback(downloaded, total_size, pct)
@@ -993,13 +1156,14 @@ def handle_download(task):
             current_size = temp_dest.stat().st_size
 
         headers = auth_headers_for_source(provider, url)
+        should_cancel, _ = make_cancel_checker(task['id'])
         ok, err = download_from_source(
             url,
             temp_dest,
             task['id'],
             current_size,
             extra_headers=headers,
-            should_cancel=lambda: is_task_cancelled(task['id']),
+            should_cancel=should_cancel,
         )
         
         if ok:
@@ -1065,15 +1229,7 @@ def handle_download_urls(task):
     active_item_progress = {}
     active_item_speed = {}
     item_progress_samples = {}
-    cancel_event = threading.Event()
-
-    def should_cancel():
-        if cancel_event.is_set():
-            return True
-        if is_task_cancelled(task['id']):
-            cancel_event.set()
-            return True
-        return False
+    should_cancel, cancel_event = make_cancel_checker(task['id'])
 
     def update_item(key, status, message=None, done_delta=0):
         with lock:
@@ -1255,7 +1411,8 @@ def handle_download_urls(task):
     for provider, items in queues.items():
         active_queues.extend(split_provider_queue(provider, items))
     if active_queues:
-        with ThreadPoolExecutor(max_workers=len(active_queues)) as executor:
+        batch_workers = min(DOWNLOAD_BATCH_WORKERS, len(active_queues))
+        with ThreadPoolExecutor(max_workers=batch_workers) as executor:
             futures = [executor.submit(worker, provider, items) for provider, items in active_queues]
             for f in futures:
                 f.result()

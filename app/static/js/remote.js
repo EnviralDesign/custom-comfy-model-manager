@@ -32,7 +32,8 @@ document.addEventListener('DOMContentLoaded', () => {
         torchIndexDisplay: document.getElementById('torch-index-display')
     };
 
-    let pollInterval = null;
+    let taskPollInterval = null;
+    let statusPollInterval = null;
     let expiryTime = null;
     let remoteConfig = {
         torch_index_url: '',
@@ -712,11 +713,9 @@ document.addEventListener('DOMContentLoaded', () => {
     fetchTasks();
     loadBundles();
 
-    // Polling fast enough to show bootstrapper byte-level progress.
-    pollInterval = setInterval(() => {
-        fetchStatus();
-        fetchTasks();
-    }, 750);
+    // Poll tasks faster for byte-level progress; status can be slower.
+    taskPollInterval = setInterval(fetchTasks, 500);
+    statusPollInterval = setInterval(fetchStatus, 5000);
 
     // Countdown ticker (every 1s)
     setInterval(updateCountdown, 1000);

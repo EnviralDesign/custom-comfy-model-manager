@@ -94,18 +94,29 @@ Local transfer tuning:
 ```
 REMOTE_STREAM_CHUNK_MIB=4     # home app file-stream read size
 DOWNLOAD_CHUNK_MIB=1          # bootstrapper read/write chunk size for responsiveness
+PROGRESS_UPDATE_INTERVAL_SECONDS=0.25
+PROGRESS_POST_TIMEOUT_SECONDS=5
 DOWNLOAD_SEGMENTS=4           # parallel byte ranges for one large file, when supported
 DOWNLOAD_SEGMENT_MIN_MIB=64   # only segment files at least this large
+DOWNLOAD_BATCH_WORKERS=3      # active provider queues at once
+TRANSFORMERS_COMPAT_PIN=transformers<5
+EXTRA_PIP_PACKAGES=sageattention triton
+OPTIONAL_PIP_PACKAGES=flash-attn
 LOCAL_DOWNLOAD_WORKERS=1      # parallel local files; keep 1 for max per-file clarity
 HF_DOWNLOAD_WORKERS=1         # parallel Hugging Face files; keep 1 for max per-file clarity
 CIVITAI_DOWNLOAD_WORKERS=1    # parallel Civitai files; keep 1 for max per-file clarity
 OTHER_DOWNLOAD_WORKERS=1      # parallel generic URL files; keep 1 for max per-file clarity
 ```
 
-The default path favors single-file throughput and readable progress. For large
-files from sources that support HTTP Range, the bootstrapper downloads multiple
-byte ranges concurrently and assembles them locally. Raise the worker counts only
-when you want higher aggregate batch throughput across several files.
+The default path runs up to one active file per provider queue while keeping each
+provider sequential internally. For large files from sources that support HTTP
+Range, each active file downloads multiple byte ranges concurrently and assembles
+locally. Raise per-provider worker counts only when you want multiple active
+files from the same provider.
+
+On Lightning, the bootstrapper defaults `UV_LINK_MODE=copy` and
+`PYTHONNOUSERSITE=1` so uv installs real files into the workspace venv and avoids
+ambient user-site packages.
 
 ## Tech Stack
 
