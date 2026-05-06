@@ -169,16 +169,111 @@ def ensure_comfy_dir(task_id=None) -> bool:
         return False
     return True
 
+def normalize_asset_relpath(relpath: str) -> Path:
+    normalized = str(relpath or "").replace("\\", "/").strip()
+    if not normalized:
+        raise ValueError("Asset path cannot be empty")
+    if normalized.startswith("/") or re.match(r"^[A-Za-z]:/", normalized):
+        raise ValueError(f"Unsafe asset path: {relpath}")
+    parts = [part for part in normalized.split("/") if part not in ("", ".")]
+    if any(part == ".." for part in parts):
+        raise ValueError(f"Unsafe asset path: {relpath}")
+    return Path(*parts)
+
 def get_asset_destination(root_type: str, relpath: str) -> Path:
     root = root_type if root_type in {"input", "workflows"} else "models"
-    clean_path = Path(relpath)
-    if clean_path.is_absolute() or ".." in clean_path.parts:
-        raise ValueError(f"Unsafe asset path: {relpath}")
+    clean_path = normalize_asset_relpath(relpath)
     if root == "input":
         return COMFY_DIR / "input" / clean_path
     if root == "workflows":
         return COMFY_DIR / "user" / "default" / "workflows" / clean_path
     return MODELS_DIR / clean_path
+
+COMFY_PATH_PREFIXES = {
+    "animatediff_models",
+    "checkpoints",
+    "clip",
+    "clip_vision",
+    "configs",
+    "controlnet",
+    "diffusion_models",
+    "embeddings",
+    "gligen",
+    "hypernetworks",
+    "insightface",
+    "ipadapter",
+    "loras",
+    "models",
+    "photomaker",
+    "sams",
+    "style_models",
+    "text_encoders",
+    "unet",
+    "upscale_models",
+    "vae",
+    "vae_approx",
+}
+
+COMFY_MODEL_EXTENSIONS = {
+    ".bin",
+    ".ckpt",
+    ".gguf",
+    ".onnx",
+    ".pth",
+    ".pt",
+    ".safetensors",
+}
+
+def looks_like_comfy_file_reference(value: str) -> bool:
+    if "\\" not in value:
+        return False
+    text = value.strip()
+    if not text or "\n" in text or "://" in text or text.lower().startswith(("data:", "http:", "https:")):
+        return False
+    normalized = text.replace("\\", "/")
+    if re.match(r"^[A-Za-z]:/", normalized):
+        return False
+    parts = [part for part in normalized.split("/") if part]
+    if len(parts) < 2:
+        return False
+    first = parts[0].lower()
+    suffix = Path(parts[-1]).suffix.lower()
+    return first in COMFY_PATH_PREFIXES or suffix in COMFY_MODEL_EXTENSIONS
+
+def normalize_workflow_path_separators(value):
+    if isinstance(value, dict):
+        changed = False
+        result = {}
+        for key, item in value.items():
+            normalized_item, item_changed = normalize_workflow_path_separators(item)
+            result[key] = normalized_item
+            changed = changed or item_changed
+        return result, changed
+    if isinstance(value, list):
+        changed = False
+        result = []
+        for item in value:
+            normalized_item, item_changed = normalize_workflow_path_separators(item)
+            result.append(normalized_item)
+            changed = changed or item_changed
+        return result, changed
+    if isinstance(value, str) and looks_like_comfy_file_reference(value):
+        return value.replace("\\", "/"), True
+    return value, False
+
+def postprocess_downloaded_asset(root_type: str, dest_path: Path):
+    if root_type != "workflows" or dest_path.suffix.lower() != ".json":
+        return
+    try:
+        raw = dest_path.read_text(encoding="utf-8-sig")
+        workflow = json.loads(raw)
+        normalized, changed = normalize_workflow_path_separators(workflow)
+        if not changed:
+            return
+        dest_path.write_text(json.dumps(normalized, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        log(f"Normalized Windows path separators in workflow: {dest_path.name}")
+    except Exception as exc:
+        log(f"Workflow path normalization skipped for {dest_path.name}: {exc}", error=True)
 
 # --- API WRAPPERS ---
 
@@ -367,11 +462,22 @@ def get_venv_script(name: str) -> Path:
         return venv_path / "Scripts" / f"{name}.exe"
     return venv_path / "bin" / name
 
+def subprocess_env():
+    env = os.environ.copy()
+    if COMFY_DIR:
+        venv_path = COMFY_DIR / ".venv"
+        script_dir = venv_path / ("Scripts" if platform.system().lower().startswith("win") else "bin")
+        if script_dir.exists():
+            env["VIRTUAL_ENV"] = str(venv_path)
+            env["PATH"] = str(script_dir) + os.pathsep + env.get("PATH", "")
+    return env
+
 def run_cmd(cmd, cwd=None):
     try:
         process = subprocess.Popen(
             cmd,
             cwd=str(cwd) if cwd else None,
+            env=subprocess_env(),
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True
@@ -698,6 +804,45 @@ def safe_custom_node_dir_name(value: str) -> str:
     value = re.sub(r"[^A-Za-z0-9_.-]+", "-", value).strip(".-")
     return value or "custom-node"
 
+def custom_node_present(custom_nodes_dir: Path, *values: str) -> bool:
+    for value in values:
+        if not value:
+            continue
+        if (custom_nodes_dir / safe_custom_node_dir_name(value)).exists():
+            return True
+    return False
+
+def install_custom_node_from_git(task_id, name, git_url, custom_nodes_dir, venv_python, progress_base, progress_done):
+    if not git_url.startswith(("http://", "https://", "git@")):
+        update_progress(task_id, "failed", progress_base, f"No usable Git URL for {name}")
+        return False
+
+    dest = custom_nodes_dir / safe_custom_node_dir_name(git_url)
+    if dest.exists():
+        update_progress(task_id, "running", progress_base, f"Custom node already present: {name}")
+    else:
+        rc, _, git_err = run_cmd(["git", "clone", git_url, str(dest)], cwd=custom_nodes_dir)
+        if rc != 0:
+            update_progress(task_id, "failed", progress_base, f"Git clone failed: {name}", error=git_err)
+            return False
+
+    requirements = dest / "requirements.txt"
+    if requirements.exists():
+        rc, _, req_err = run_cmd([str(venv_python), "-m", "pip", "install", "-r", str(requirements)], cwd=COMFY_DIR)
+        if rc != 0:
+            update_progress(task_id, "failed", progress_base, f"Requirements install failed: {name}", error=req_err)
+            return False
+
+    install_py = dest / "install.py"
+    if install_py.exists():
+        rc, _, install_err = run_cmd([str(venv_python), str(install_py)], cwd=dest)
+        if rc != 0:
+            update_progress(task_id, "failed", progress_base, f"Custom node install.py failed: {name}", error=install_err)
+            return False
+
+    update_progress(task_id, "running", progress_done, f"Installed custom node: {name}")
+    return True
+
 def apply_dependency_compatibility_fixes(task_id, progress=0.95):
     """Apply narrow dependency remediations for known Comfy/custom-node import traps."""
     if not TRANSFORMERS_COMPAT_PIN:
@@ -792,36 +937,26 @@ def handle_install_custom_nodes(task):
                 else:
                     rc, out, cli_err = 127, "", "comfy command not found after installing comfy-cli"
             if rc == 0:
-                update_progress(task["id"], "running", progress_done, f"Installed custom node: {name}")
-                continue
+                if not repo or custom_node_present(custom_nodes_dir, repo, name, node_id):
+                    update_progress(task["id"], "running", progress_done, f"Installed custom node: {name}")
+                    continue
+                log(f"Registry install reported success but no custom_nodes directory was found for {name}; falling back to Git clone.")
+            elif not repo:
+                cli_output = f"{out}\n{cli_err}".strip()
+                update_progress(task["id"], "failed", progress_base, f"Official registry install failed: {name}", error=cli_output)
+                return
 
             cli_output = f"{out}\n{cli_err}".strip()
-            update_progress(task["id"], "failed", progress_base, f"Official registry install failed: {name}", error=cli_output)
+            if cli_output:
+                log(f"Official registry install did not complete for {name}; falling back to Git clone. Output: {cli_output}")
+
+            if install_custom_node_from_git(task["id"], name, repo, custom_nodes_dir, venv_python, progress_base, progress_done):
+                continue
             return
 
         git_url = repo or node_id
-        if not git_url.startswith(("http://", "https://", "git@")):
-            update_progress(task["id"], "failed", progress_base, f"No usable Git URL for {name}")
+        if not install_custom_node_from_git(task["id"], name, git_url, custom_nodes_dir, venv_python, progress_base, progress_done):
             return
-
-        dest = custom_nodes_dir / safe_custom_node_dir_name(git_url)
-        if dest.exists():
-            update_progress(task["id"], "running", progress_done, f"Custom node already present: {name}")
-            continue
-
-        rc, _, git_err = run_cmd(["git", "clone", git_url, str(dest)], cwd=custom_nodes_dir)
-        if rc != 0:
-            update_progress(task["id"], "failed", progress_base, f"Git clone failed: {name}", error=git_err)
-            return
-
-        requirements = dest / "requirements.txt"
-        if requirements.exists():
-            rc, _, req_err = run_cmd([str(venv_python), "-m", "pip", "install", "-r", str(requirements)], cwd=COMFY_DIR)
-            if rc != 0:
-                update_progress(task["id"], "failed", progress_base, f"Requirements install failed: {name}", error=req_err)
-                return
-
-        update_progress(task["id"], "running", progress_done, f"Installed custom node: {name}")
 
     if not apply_dependency_compatibility_fixes(task["id"], 0.98):
         return
@@ -1121,6 +1256,7 @@ def handle_download(task):
     # Check if exists (Simple check, not verifying hash in this iteration)
     if final_dest.exists():
         log(f"File {final_dest.name} already exists. Skipping.")
+        postprocess_downloaded_asset(root_type, final_dest)
         update_progress(task['id'], "completed", 1.0, "Already exists")
         return
 
@@ -1168,6 +1304,7 @@ def handle_download(task):
         
         if ok:
             temp_dest.rename(final_dest)
+            postprocess_downloaded_asset(root_type, final_dest)
             success = True
             break
         elif err == "cancelled":
@@ -1352,6 +1489,7 @@ def handle_download_urls(task):
 
             if dest_path.exists():
                 log(f"{relpath} already exists. Skipping.")
+                postprocess_downloaded_asset(root_type, dest_path)
                 update_item(item_key, "skipped", f"Skipping existing: {relpath}", done_delta=1)
                 continue
 
@@ -1380,6 +1518,7 @@ def handle_download_urls(task):
 
             if ok:
                 temp_dest.rename(dest_path)
+                postprocess_downloaded_asset(root_type, dest_path)
                 log(f"Successfully downloaded {relpath}")
                 update_item(item_key, "completed", f"Completed: {relpath}", done_delta=1)
             elif err == "cancelled":

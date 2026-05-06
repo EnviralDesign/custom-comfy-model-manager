@@ -89,6 +89,15 @@ files, and finally heavier model files. Local model/input/workflow files are
 streamed through the manager using the session bearer token; public source URLs
 are used when available.
 
+Launch ComfyUI from the remote ComfyUI workspace with this primary entry point:
+
+```
+cd ~/ComfyUI
+uv run comfy launch -- --listen 0.0.0.0 --port 8188 --enable-manager
+```
+
+Use Lightning's port viewer or public port URL for port `8188`.
+
 Local transfer tuning:
 
 ```

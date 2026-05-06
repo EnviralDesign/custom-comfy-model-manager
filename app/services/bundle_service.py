@@ -82,6 +82,28 @@ class BundleService:
                     asset_count=row["asset_count"]
                 )
                 bundles.append(bundle)
+
+            if bundles:
+                placeholders = ",".join("?" for _ in bundles)
+                cursor = await db.execute(f"""
+                    SELECT bundle_id, install_type, node_id, name, repository, version
+                    FROM bundle_custom_nodes
+                    WHERE bundle_id IN ({placeholders})
+                    ORDER BY install_type, name, node_id
+                """, [bundle.id for bundle in bundles])
+                bundles_by_id = {bundle.id: bundle for bundle in bundles}
+                for node_row in await cursor.fetchall():
+                    bundle = bundles_by_id.get(node_row["bundle_id"])
+                    if not bundle:
+                        continue
+                    bundle.custom_nodes.append(BundleCustomNode(
+                        install_type=node_row["install_type"] or "registry",
+                        node_id=node_row["node_id"],
+                        name=node_row["name"],
+                        repository=node_row["repository"],
+                        version=node_row["version"],
+                    ))
+
             return bundles
     
     async def get_bundle(self, name: str) -> Optional[Bundle]:
