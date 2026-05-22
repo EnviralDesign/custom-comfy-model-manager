@@ -41,7 +41,7 @@ class Settings(BaseSettings):
     # xAI (Grok) - AI URL discovery
     xai_api_key: str | None = None
     xai_api_base_url: str = "https://api.x.ai"
-    xai_model: str = "grok-4-1-fast-reasoning"
+    xai_model: str = "grok-4.3"
     xai_lookup_concurrency: int = 1
     ai_lookup_mode: str = "tool_agent"
     ai_tool_max_steps: int = 20

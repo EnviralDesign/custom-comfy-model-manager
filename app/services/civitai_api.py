@@ -22,11 +22,12 @@ class CivitaiFileCandidate:
 
 
 class CivitaiClient:
-    def __init__(self, *, base_url: str, api_key: str | None = None, timeout: int = 20) -> None:
+    def __init__(self, *, base_url: str, api_key: str | None = None, timeout: int = 10) -> None:
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
         self.timeout = timeout
         self._session = requests.Session()
+        self.last_error: str | None = None
 
     def _headers(self) -> dict[str, str]:
         headers = {"User-Agent": "ComfyModelManager/0.1"}
@@ -36,12 +37,19 @@ class CivitaiClient:
 
     def _get(self, path: str, params: dict[str, Any] | None = None) -> dict[str, Any] | None:
         url = f"{self.base_url}{path}"
-        resp = self._session.get(url, params=params, headers=self._headers(), timeout=self.timeout)
+        self.last_error = None
+        try:
+            resp = self._session.get(url, params=params, headers=self._headers(), timeout=self.timeout)
+        except requests.RequestException as exc:
+            self.last_error = f"Civitai request failed: {exc}"
+            return None
         if resp.status_code >= 400:
+            self.last_error = f"Civitai HTTP {resp.status_code}: {resp.text[:200]}"
             return None
         try:
             return resp.json()
-        except Exception:
+        except Exception as exc:
+            self.last_error = f"Civitai returned invalid JSON: {exc}"
             return None
 
     def search_models(
@@ -231,21 +239,34 @@ def find_civitai_download(
             return ci[0]
         return None
 
+    def choose_hash_match(candidates: list[CivitaiFileCandidate]) -> CivitaiFileCandidate | None:
+        best = choose_best(candidates)
+        if best:
+            return best
+        if len(candidates) == 1:
+            return candidates[0]
+        return None
+
     if file_hash and not file_hash.startswith("fast:"):
         steps.append("Civitai hash lookup via model-versions/by-hash.")
         payload = client.get_model_version_by_hash(file_hash)
+        if not payload and client.last_error:
+            steps.append(client.last_error)
         if isinstance(payload, dict):
             version = payload.get("modelVersion") or payload
             if isinstance(version, dict):
                 candidates = list(_extract_file_candidates(payload.get("model"), version))
                 candidates = [c for c in candidates if _metadata_matches(c.metadata, hints)]
-                best = choose_best(candidates)
+                best = choose_hash_match(candidates)
                 if best:
+                    renamed_note = ""
+                    if best.file_name and best.file_name != filename:
+                        renamed_note = f" Civitai filename is {best.file_name}."
                     return {
                         "found": True,
                         "url": best.download_url,
                         "source": "civitai_hash",
-                        "notes": f"Matched hash on model version {best.version_id}.",
+                        "notes": f"Matched hash on model version {best.version_id}.{renamed_note}",
                         "steps": steps,
                     }
 
@@ -255,6 +276,8 @@ def find_civitai_download(
     for variant in variants:
         payload = client.search_models(query=variant, limit=20, page=1)
         if not payload:
+            if client.last_error:
+                steps.append(client.last_error)
             continue
         items = payload.get("items") or []
         if not isinstance(items, list):

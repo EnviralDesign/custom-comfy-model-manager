@@ -1343,6 +1343,14 @@ a:hover {
     color: white;
 }
 
+.btn-ai-lookup.is-queued,
+.btn-ai-lookup:disabled {
+    opacity: 0.85 !important;
+    border-color: #fbbf24;
+    color: #fbbf24;
+    cursor: default;
+}
+
 /* ========== Hash File Button ========== */
 .btn-hash-file,
 .btn-hash-folder {

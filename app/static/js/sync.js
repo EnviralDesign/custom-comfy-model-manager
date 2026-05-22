@@ -23,6 +23,7 @@ const Sync = {
     dragRelpath: null,
     moveContext: null,
     minMetricSizeBytes: 5 * 1024 * 1024,
+    minAiLookupSizeBytes: 100 * 1024 * 1024,
 
     async init() {
         this.bindEvents();
@@ -500,8 +501,11 @@ const Sync = {
                 ? `<button class="btn-hash-file" data-action="hash-file" data-relpath="${file.relpath}" title="${hasLocal && hasLake ? 'Hash & compare' : 'Compute hash'}">#️⃣</button>`
                 : '';
 
-            // URL and Bundle buttons
+            // URL, AI lookup, and Bundle buttons
             const sourceUrlBtn = `<button class="btn-source-url ${hasSourceUrl ? 'has-url' : ''}" data-action="source-url" data-hash="${fileHash || ''}" data-relpath="${file.relpath}" data-filename="${file.filename}" title="${hasSourceUrl ? 'Edit source URL' : 'Add source URL'}">🔗</button>`;
+            const aiLookupBtn = this.isAiLookupEligible(file) && !hasSourceUrl
+                ? `<button class="btn-ai-lookup" data-action="ai-lookup-file" data-hash="${fileHash || ''}" data-relpath="${this.escapeHtml(file.relpath)}" data-filename="${this.escapeHtml(file.filename)}" title="Queue AI source URL lookup for this file">✨</button>`
+                : '';
             const bundleBtn = `<button class="btn-add-bundle" data-action="add-to-bundle" data-hash="${fileHash || ''}" data-relpath="${file.relpath}" data-filename="${file.filename}" title="Add to bundle">📦</button>`;
 
             const queueBadgeHtml = this.getQueueBadgeHtml(queueInfo ? queueInfo.status : null);
@@ -529,6 +533,7 @@ const Sync = {
                         <div class="path-actions">
                             ${hashBtn}
                             ${sourceUrlBtn}
+                            ${aiLookupBtn}
                             ${bundleBtn}
                         </div>
                     </div>
@@ -604,6 +609,11 @@ const Sync = {
     isMetricFile(file) {
         const size = this.getEntrySize(file);
         return size >= this.minMetricSizeBytes;
+    },
+
+    isAiLookupEligible(file) {
+        const size = this.getEntrySize(file);
+        return size >= this.minAiLookupSizeBytes;
     },
 
     getEntrySize(file) {
@@ -913,6 +923,13 @@ const Sync = {
         if (target.dataset.action === 'ai-lookup-folder') {
             const folderPath = target.dataset.folder || '';
             this.enqueueFolderAiLookup(folderPath);
+            return;
+        }
+
+        // AI lookup for a single file
+        if (target.dataset.action === 'ai-lookup-file') {
+            const relpath = target.dataset.relpath;
+            this.enqueueFileAiLookup(relpath, target);
             return;
         }
 
@@ -1312,9 +1329,10 @@ const Sync = {
         }
     },
 
-    async enqueueAiLookups(items) {
+    async enqueueAiLookups(items, options = {}) {
+        const showAlert = options.showAlert !== false;
         if (!items || items.length === 0) {
-            alert('No eligible files found for AI lookup.');
+            if (showAlert) alert('No eligible files found for AI lookup.');
             return;
         }
 
@@ -1327,9 +1345,57 @@ const Sync = {
                 msg += ` Skipped ${skipped} existing job${skipped === 1 ? '' : 's'}.`;
             }
             msg += ' Review results in the AI Review tab.';
-            alert(msg);
+            App.loadQueueTasks();
+            if (showAlert) alert(msg);
+            return res;
         } catch (err) {
             alert('Failed to enqueue AI lookups: ' + err.message);
+            if (options.throwOnError) throw err;
+        }
+    },
+
+    async enqueueFileAiLookup(relpath, button = null) {
+        const entry = this.diffData.find(item => item.relpath === relpath);
+        if (!entry) {
+            alert('Could not find file entry for AI lookup.');
+            return;
+        }
+
+        if (!this.isAiLookupEligible(entry)) {
+            alert('AI lookup is only available for files 100 MB or larger.');
+            return;
+        }
+
+        const fileHash = entry.lake_hash || entry.local_hash || null;
+        const hasSourceUrlByHash = fileHash && this.sourceUrls.has(fileHash);
+        const hasSourceUrlByRelpath = this.sourceUrlsByRelpath?.has(entry.relpath);
+        if (hasSourceUrlByHash || hasSourceUrlByRelpath) {
+            alert('This file already has a source URL.');
+            return;
+        }
+
+        const item = {
+            filename: entry.filename || entry.relpath.split('/').pop(),
+            relpath: entry.relpath,
+            file_hash: fileHash,
+        };
+
+        if (button) {
+            button.disabled = true;
+            button.classList.add('is-queued');
+            button.textContent = '⏳';
+            button.title = 'AI lookup queued';
+        }
+
+        try {
+            await this.enqueueAiLookups([item], { showAlert: false, throwOnError: true });
+        } catch (err) {
+            if (button) {
+                button.disabled = false;
+                button.classList.remove('is-queued');
+                button.textContent = '✨';
+                button.title = 'Queue AI source URL lookup for this file';
+            }
         }
     },
 
@@ -1339,7 +1405,7 @@ const Sync = {
             if (folderPath) {
                 if (!(entry.relpath === folderPath || entry.relpath.startsWith(prefix))) return false;
             }
-            if (!this.isMetricFile(entry)) return false;
+            if (!this.isAiLookupEligible(entry)) return false;
             const fileHash = entry.lake_hash || entry.local_hash;
             const hasSourceUrlByHash = fileHash && this.sourceUrls.has(fileHash);
             const hasSourceUrlByRelpath = this.sourceUrlsByRelpath?.has(entry.relpath);

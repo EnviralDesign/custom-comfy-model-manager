@@ -77,7 +77,8 @@ const AiReview = {
 
     renderJob(job) {
         const status = this.getStatus(job);
-        const steps = (job.steps || []).slice(-6);
+        const usageStep = this.getUsageStep(job);
+        const steps = (job.steps || []).filter(s => !(s.message || '').startsWith('xAI token usage:')).slice(-6);
         const stepsHtml = steps.length
             ? `<div class="ai-review-steps"><ul>${steps.map(s => `<li><strong>${this.escapeHtml(s.source || 'system')}:</strong> ${this.escapeHtml(s.message || '')}</li>`).join('')}</ul></div>`
             : '';
@@ -99,6 +100,9 @@ const AiReview = {
         const notesHtml = notes
             ? `<div class="ai-review-url"><strong>Notes:</strong> ${this.escapeHtml(notes)}</div>`
             : '';
+        const usageHtml = usageStep
+            ? `<div class="ai-review-url"><strong>Usage:</strong> ${this.escapeHtml(usageStep.message.replace(/^xAI token usage:\s*/, ''))}</div>`
+            : '';
 
         const actions = this.renderActions(job, status.key);
 
@@ -113,6 +117,7 @@ const AiReview = {
                 ${sourceHtml}
                 ${validationHtml}
                 ${notesHtml}
+                ${usageHtml}
                 ${stepsHtml}
                 <div class="ai-review-actions">
                     ${actions}
@@ -152,6 +157,17 @@ const AiReview = {
         }
 
         return actions.join('');
+    },
+
+    getUsageStep(job) {
+        const steps = job.steps || [];
+        for (let i = steps.length - 1; i >= 0; i--) {
+            const message = steps[i].message || '';
+            if (message.startsWith('xAI token usage:')) {
+                return steps[i];
+            }
+        }
+        return null;
     },
 
     getStatus(job) {

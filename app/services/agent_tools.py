@@ -100,6 +100,8 @@ def civitai_search(
         nsfw=nsfw,
         tag=tag,
     ) or {}
+    if not payload and client.last_error:
+        return {"items": [], "nextPage": None, "error": client.last_error}
     items = payload.get("items") or []
     return {
         "items": _summarize_civitai_models(items, limit),
@@ -110,6 +112,8 @@ def civitai_search(
 def civitai_model_version(*, version_id: int, base_url: str, api_key: str | None) -> dict[str, Any]:
     client = CivitaiClient(base_url=base_url, api_key=api_key)
     payload = client.get_model_version(version_id) or {}
+    if not payload and client.last_error:
+        return {"modelVersion": None, "error": client.last_error}
     version = payload.get("modelVersion") or payload
     files = []
     for f in (version.get("files") or [])[:8]:
@@ -129,7 +133,10 @@ def civitai_by_hash(*, file_hash: str, base_url: str, api_key: str | None) -> di
     client = CivitaiClient(base_url=base_url, api_key=api_key)
     payload = client.get_model_version_by_hash(file_hash)
     if not payload:
-        return {"found": False}
+        result: dict[str, Any] = {"found": False}
+        if client.last_error:
+            result["error"] = client.last_error
+        return result
     version = payload.get("modelVersion") or payload
     model_obj = payload.get("model") or {}
     files = []

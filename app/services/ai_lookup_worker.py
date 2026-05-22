@@ -159,7 +159,8 @@ class AiLookupWorker:
                 )
                 return
 
-            if not filename_matches_url(job["filename"], candidate_url, validation.get("filename")):
+            hash_verified_source = str(result.get("source") or "").startswith("civitai_hash")
+            if not hash_verified_source and not filename_matches_url(job["filename"], candidate_url, validation.get("filename")):
                 await self._complete_job(
                     job_id,
                     found=0,

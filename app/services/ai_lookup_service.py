@@ -8,6 +8,11 @@ from typing import Any, Optional
 import requests
 
 from app.services.civitai_api import find_civitai_download
+from app.services.xai_usage import (
+    PROMPT_CACHE_KEY,
+    extract_usage,
+    format_usage_summary,
+)
 
 
 def extract_response_text(payload: dict) -> str:
@@ -105,6 +110,7 @@ def call_xai_lookup(
             {"role": "user", "content": user_prompt},
         ],
         "tools": [{"type": "web_search"}],
+        "prompt_cache_key": PROMPT_CACHE_KEY,
         "temperature": 0.2,
         "max_output_tokens": 600,
         "store": False,
@@ -126,14 +132,18 @@ def call_xai_lookup(
         }
 
     data = response.json()
+    token_usage = extract_usage(data)
     text = extract_response_text(data)
     result = extract_json_object(text) or {}
+    steps = normalize_steps(result.get("steps"))
+    steps.append(format_usage_summary(token_usage))
     return {
         "found": bool(result.get("found")),
         "url": (result.get("url") or "").strip(),
         "source": (result.get("source") or "").strip(),
         "notes": (result.get("notes") or "").strip(),
-        "steps": normalize_steps(result.get("steps")),
+        "steps": steps,
+        "token_usage": token_usage,
         "raw_text": text,
     }
 
@@ -153,13 +163,22 @@ def call_ai_lookup(
     tool_max_steps: int = 12,
 ) -> dict:
     if lookup_mode == "tool_agent":
+        civitai_result = find_civitai_download(
+            filename=filename,
+            file_hash=file_hash,
+            base_url=civitai_base_url,
+            api_key=civitai_api_key,
+        )
+        if civitai_result.get("found") and civitai_result.get("url"):
+            return {
+                "found": True,
+                "url": civitai_result.get("url"),
+                "source": civitai_result.get("source") or "civitai",
+                "notes": civitai_result.get("notes"),
+                "steps": normalize_steps(civitai_result.get("steps")),
+            }
+
         if not api_key:
-            civitai_result = find_civitai_download(
-                filename=filename,
-                file_hash=file_hash,
-                base_url=civitai_base_url,
-                api_key=civitai_api_key,
-            )
             steps = normalize_steps(civitai_result.get("steps"))
             steps.append("Tool agent skipped: XAI_API_KEY not configured.")
             return {
@@ -172,7 +191,7 @@ def call_ai_lookup(
 
         from app.services.ai_tool_agent import run_tool_agent_lookup
 
-        return run_tool_agent_lookup(
+        agent_result = run_tool_agent_lookup(
             base_url=base_url,
             api_key=api_key,
             model=model,
@@ -185,6 +204,11 @@ def call_ai_lookup(
             max_steps=tool_max_steps,
             require_exact_filename=True,
         )
+        combined_steps = []
+        combined_steps.extend(normalize_steps(civitai_result.get("steps")))
+        combined_steps.extend(normalize_steps(agent_result.get("steps")))
+        agent_result["steps"] = combined_steps
+        return agent_result
 
     civitai_result = find_civitai_download(
         filename=filename,

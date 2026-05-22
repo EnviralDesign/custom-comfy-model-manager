@@ -19,6 +19,12 @@ from app.services.agent_tools import (
     hf_resolve,
     url_validate,
 )
+from app.services.xai_usage import (
+    PROMPT_CACHE_KEY,
+    add_usage,
+    extract_usage,
+    format_usage_summary,
+)
 
 
 def _now_iso() -> str:
@@ -85,6 +91,8 @@ def _call_xai_agent_step(
     payload = {
         "model": model,
         "input": messages,
+        "tools": [{"type": "web_search"}],
+        "prompt_cache_key": PROMPT_CACHE_KEY,
         "temperature": 0.2,
         "max_output_tokens": max_output_tokens,
         "store": False,
@@ -102,7 +110,7 @@ def _call_xai_agent_step(
         return {"error": f"xAI error {response.status_code}: {response.text}"}
     data = response.json()
     text = _extract_response_text(data)
-    return {"text": text}
+    return {"text": text, "usage": extract_usage(data)}
 
 
 
@@ -123,6 +131,7 @@ def run_tool_agent_lookup(
     should_cancel: Callable[[], bool] | None = None,
 ) -> dict:
     steps: list[str] = []
+    token_usage: dict[str, int] = {}
     hints = parse_filename_hints(filename) if filename else {}
 
     tool_list = [
@@ -138,21 +147,35 @@ def run_tool_agent_lookup(
     system_prompt = (
         "You are a tool-using agent that must find a direct download URL for a model file.\n"
         "Rules:\n"
-        "- Use ONLY the tools provided; do not guess URLs.\n"
+        "- You have xAI's built-in web_search available for broad web discovery before choosing a JSON action.\n"
+        "- web_search is server-side, not a JSON action. Use it internally, then respond with a JSON action or final answer.\n"
+        "- You also have local tools available through JSON actions; do not guess URLs.\n"
         "- Always respond with a single JSON object and nothing else.\n"
         "- Prefer exact filename matches. If require_exact_filename is true, only return a URL if the "
         "downloaded filename matches exactly (case-sensitive).\n"
+        "- Err on the side of conservative matching: if you are not highly confident the URL is for the same "
+        "model/repo/file, return found=false instead of risking a wrong source URL.\n"
+        "- Generic shard names such as pytorch_model-00001-of-00002.bin, model-00001-of-00004.safetensors, "
+        "or diffusion_pytorch_model.bin are not enough by themselves; require repo/folder/context evidence "
+        "that the shard belongs to the same model.\n"
         "- Use url.validate before finalizing a URL unless a tool already returned validation.\n"
         "- If you cannot find a match, respond with action=final and found=false.\n\n"
+        "Tool priorities:\n"
+        "1. Use xAI web_search first for broad discovery across Hugging Face, GitHub, model indexes, creator pages, and the general web.\n"
+        "2. Use bespoke Civitai tools for Civitai because Civitai is less reliably searchable from general web search.\n"
+        "3. Use Hugging Face tools when web_search finds a likely repo or when you need exact repo file metadata/direct URLs.\n"
+        "4. Use url.validate before finalizing any candidate URL unless a resolving tool already validated it.\n\n"
         "Search strategy (derive terms yourself):\n"
         "- Break the filename into high-impact tokens: split underscores/dashes, camelCase, numbers, and version tags.\n"
         "- Try short, meaningful query combos (2-4 tokens). Include model name fragments, family names, and version cues.\n"
         "- Drop file extensions and low-signal tokens (e.g., 'safetensors', 'ckpt', 'fp16', 'pruned') from search.\n"
         "- Try permutations: e.g., 'wan remix', 'wan 2.2', 't2v i2v', 'i2v high', 'v2.0'.\n"
+        "- When web_search returns a likely non-Civitai page, inspect the result enough to find a direct download page or canonical repo.\n"
+        "- When web_search points to Hugging Face, call hf.model_info or hf.resolve to confirm exact filename availability.\n"
+        "- For generic shard filenames, prefer hf.model_info first and verify the surrounding repo/file set before resolving a URL.\n"
+        "- When web_search points to Civitai or the filename looks like a Civitai asset, call civitai.by_hash if a hash is available, otherwise civitai.search.\n"
         "- If you have a type hint (e.g., LORA or Checkpoint), pass it via civitai.search types to reduce noise.\n"
-        "- You may use supportsGeneration=true to suppress workflows and non-model content, or leave unset for broad search.\n"
-        "- Prefer Civitai search first. Run at least 4 distinct civitai.search queries before any hf.search.\n"
-        "- Only use hf.search if Civitai searches are exhausted or clearly irrelevant.\n\n"
+        "- You may use supportsGeneration=true to suppress workflows and non-model content, or leave unset for broad Civitai search.\n\n"
         "Output schema:\n"
         '{"action":"tool","tool":"name","args":{...}} or '
         '{"action":"final","found":true|false,"url":"string|null","reason":"string"}\n\n'
@@ -243,12 +266,14 @@ def run_tool_agent_lookup(
 
     for step in range(max(1, max_steps)):
         if should_cancel and should_cancel():
+            steps.append(format_usage_summary(token_usage))
             return {
                 "found": False,
                 "url": None,
                 "source": None,
                 "notes": "Cancelled",
                 "steps": steps,
+                "token_usage": token_usage,
             }
 
         emit("agent_step", {"step": step + 1})
@@ -261,6 +286,7 @@ def run_tool_agent_lookup(
 
         if response.get("error"):
             steps.append(response["error"])
+            steps.append(format_usage_summary(token_usage))
             emit("error", {"message": response["error"]})
             return {
                 "found": False,
@@ -268,13 +294,16 @@ def run_tool_agent_lookup(
                 "source": None,
                 "notes": response["error"],
                 "steps": steps,
+                "token_usage": token_usage,
             }
 
         text = response.get("text") or ""
+        add_usage(token_usage, response.get("usage") or {})
         emit("agent_output", {"text": text})
         action = _extract_json_object(text)
         if not action:
             steps.append("Agent returned invalid JSON.")
+            steps.append(format_usage_summary(token_usage))
             emit("error", {"message": "invalid_json"})
             return {
                 "found": False,
@@ -282,6 +311,7 @@ def run_tool_agent_lookup(
                 "source": None,
                 "notes": "Agent returned invalid JSON.",
                 "steps": steps,
+                "token_usage": token_usage,
             }
 
         if action.get("action") == "tool":
@@ -301,6 +331,7 @@ def run_tool_agent_lookup(
             tool_fn = tools.get(tool_name)
             if not tool_fn:
                 steps.append(f"Unknown tool: {tool_name}")
+                steps.append(format_usage_summary(token_usage))
                 emit("error", {"message": f"unknown_tool:{tool_name}"})
                 return {
                     "found": False,
@@ -308,6 +339,7 @@ def run_tool_agent_lookup(
                     "source": None,
                     "notes": f"Unknown tool: {tool_name}",
                     "steps": steps,
+                    "token_usage": token_usage,
                 }
             emit("tool_call", {"tool": tool_name, "args": args})
             result = tool_fn(args)
@@ -323,12 +355,14 @@ def run_tool_agent_lookup(
             reason = action.get("reason") or None
             if not found or not url:
                 steps.append(reason or "No match found.")
+                steps.append(format_usage_summary(token_usage))
                 return {
                     "found": False,
                     "url": None,
                     "source": None,
                     "notes": reason,
                     "steps": steps,
+                    "token_usage": token_usage,
                 }
 
             validation = check_url_sync(url)
@@ -347,15 +381,18 @@ def run_tool_agent_lookup(
                     continue
 
             steps.append("Final URL accepted.")
+            steps.append(format_usage_summary(token_usage))
             return {
                 "found": True,
                 "url": url,
                 "source": action.get("source") or "tool_agent",
                 "notes": reason,
                 "steps": steps,
+                "token_usage": token_usage,
             }
 
         steps.append("Agent response missing action.")
+        steps.append(format_usage_summary(token_usage))
         emit("error", {"message": "missing_action"})
         return {
             "found": False,
@@ -363,13 +400,16 @@ def run_tool_agent_lookup(
             "source": None,
             "notes": "Agent response missing action.",
             "steps": steps,
+            "token_usage": token_usage,
         }
 
     steps.append("Max steps reached without result.")
+    steps.append(format_usage_summary(token_usage))
     return {
         "found": False,
         "url": None,
         "source": None,
         "notes": "Max steps reached without result.",
         "steps": steps,
+        "token_usage": token_usage,
     }
