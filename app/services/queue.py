@@ -1,13 +1,14 @@
 """Queue service for managing transfer and delete operations."""
 
-import asyncio
-from pathlib import Path
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Literal
+
 from pydantic import BaseModel
 
 from app.config import get_settings
 from app.database import get_db
+from app.services.queue_paths import normalize_queue_relpath, resolve_queue_path
 
 
 class QueueTask(BaseModel):
@@ -25,6 +26,8 @@ class QueueTask(BaseModel):
     created_at: str
     started_at: str | None
     completed_at: str | None
+    verify_folder: str | None = None
+    operation_phase: str | None = None
 
 
 class QueueService:
@@ -32,12 +35,16 @@ class QueueService:
     
     def _get_root(self, side: str) -> Path:
         settings = get_settings()
-        return settings.local_models_root if side == "local" else settings.lake_models_root
+        if side == "local":
+            return settings.local_models_root
+        if side == "lake":
+            return settings.lake_models_root
+        raise ValueError(f"Unknown queue side: {side}")
 
     def _resolve_move_paths(self, side: str, src_relpath: str, dst_relpath: str) -> tuple[Path, Path]:
         root = self._get_root(side)
-        src_path = root / src_relpath.replace("/", "\\")
-        dst_path = root / dst_relpath.replace("/", "\\")
+        src_path, _ = resolve_queue_path(root, src_relpath)
+        dst_path, _ = resolve_queue_path(root, dst_relpath)
         return src_path, dst_path
 
     def _get_move_status(self, side: str, src_relpath: str, dst_relpath: str) -> dict:
@@ -53,7 +60,7 @@ class QueueService:
         src_path, dst_path = self._resolve_move_paths(side, src_relpath, dst_relpath)
         src_exists = src_path.exists()
         dst_exists = dst_path.exists()
-        if not src_exists:
+        if not src_exists or not src_path.is_file():
             return {
                 "side": side,
                 "ok": False,
@@ -84,7 +91,7 @@ class QueueService:
         if src_relpath == dst_relpath:
             return False, "Source and destination are the same"
         src_path, dst_path = self._resolve_move_paths(side, src_relpath, dst_relpath)
-        if not src_path.exists():
+        if not src_path.exists() or not src_path.is_file():
             return False, f"{side} source not found"
         if dst_path.exists():
             return False, f"{side} destination already exists"
@@ -108,11 +115,23 @@ class QueueService:
             cursor = await db.execute("SELECT * FROM queue WHERE status = 'running' LIMIT 1")
             row = await cursor.fetchone()
             return QueueTask(**dict(row)) if row else None
+
+    async def get_active_tasks(self) -> list[QueueTask]:
+        async with get_db() as db:
+            cursor = await db.execute(
+                "SELECT * FROM queue WHERE status = 'running' ORDER BY started_at ASC, id ASC"
+            )
+            return [QueueTask(**dict(row)) for row in await cursor.fetchall()]
     
     async def enqueue_copy(self, src_side: str, src_relpath: str, dst_side: str, dst_relpath: str) -> int:
         now = datetime.now(timezone.utc).isoformat()
-        src_path = self._get_root(src_side) / src_relpath.replace("/", "\\")
-        size = src_path.stat().st_size if src_path.exists() else 0
+        src_path, src_relpath = resolve_queue_path(self._get_root(src_side), src_relpath)
+        dst_path, dst_relpath = resolve_queue_path(self._get_root(dst_side), dst_relpath)
+        if not src_path.is_file():
+            raise ValueError(f"Copy source is not a file: {src_relpath}")
+        if dst_path.exists() and not dst_path.is_file():
+            raise ValueError(f"Copy destination is not a file: {dst_relpath}")
+        size = src_path.stat().st_size
         async with get_db() as db:
             cursor = await db.execute(
                 "INSERT INTO queue (task_type, src_side, src_relpath, dst_side, dst_relpath, size_bytes, created_at) VALUES ('copy', ?, ?, ?, ?, ?, ?)",
@@ -129,6 +148,8 @@ class QueueService:
         if not sides:
             raise ValueError("No sides selected for move")
 
+        src_relpath = normalize_queue_relpath(src_relpath)
+        dst_relpath = normalize_queue_relpath(dst_relpath)
         if src_relpath == dst_relpath:
             raise ValueError("Move blocked: source and destination are the same")
 
@@ -170,7 +191,9 @@ class QueueService:
             if side == "lake" and not settings.lake_allow_delete:
                 raise ValueError("Delete not allowed on Lake")
         now = datetime.now(timezone.utc).isoformat()
-        filepath = self._get_root(side) / relpath.replace("/", "\\")
+        filepath, relpath = resolve_queue_path(self._get_root(side), relpath)
+        if filepath.exists() and not filepath.is_file():
+            raise ValueError(f"Delete target is not a file: {relpath}")
         size = filepath.stat().st_size if filepath.exists() else 0
         async with get_db() as db:
             cursor = await db.execute(
@@ -181,9 +204,10 @@ class QueueService:
             return cursor.lastrowid or 0
     
     async def cancel_task(self, task_id: int) -> bool:
+        """Cancel a task that has not started; running cancellation is worker-owned."""
         async with get_db() as db:
             cursor = await db.execute(
-                "UPDATE queue SET status = 'cancelled', completed_at = ? WHERE id = ? AND status IN ('pending', 'running')",
+                "UPDATE queue SET status = 'cancelled', completed_at = ? WHERE id = ? AND status = 'pending'",
                 (datetime.now(timezone.utc).isoformat(), task_id)
             )
             await db.commit()
@@ -196,10 +220,10 @@ class QueueService:
             return cursor.rowcount > 0
 
     async def cancel_all_tasks(self) -> int:
-        """Cancel all pending and running tasks."""
+        """Cancel all pending tasks; the worker acknowledges running tasks."""
         async with get_db() as db:
             cursor = await db.execute(
-                "UPDATE queue SET status = 'cancelled', completed_at = ? WHERE status IN ('pending', 'running')",
+                "UPDATE queue SET status = 'cancelled', completed_at = ? WHERE status = 'pending'",
                 (datetime.now(timezone.utc).isoformat(),)
             )
             await db.commit()

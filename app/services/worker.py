@@ -1,174 +1,352 @@
 """Background queue worker for processing file transfers."""
 
 import asyncio
-import shutil
-from pathlib import Path
+import os
+import sqlite3
+import time
 from datetime import datetime, timezone
-from typing import Callable
+from pathlib import Path
 
 import aiofiles
 import aiofiles.os
 
 from app.config import get_settings
 from app.database import get_db
+from app.services.queue_paths import resolve_queue_path
+from app.services.queue_scheduler import (
+    LANE_CLEANUP,
+    LANE_INTEGRITY,
+    LANE_TRANSFER,
+    select_runnable_tasks,
+    task_lane,
+    task_resources,
+)
 from app.websocket import broadcast
 
 
 class QueueWorker:
-    """Background worker that processes queue tasks."""
-    
+    """Concurrent, path-safe background scheduler for file operations."""
+
     _instance = None
     _running = False
     _paused = False
-    _current_task_id = None
-    _abort_current_task = False
-    
+
     def __init__(self):
         self.settings = get_settings()
-    
+        self._scheduler_task: asyncio.Task | None = None
+        self._active: dict[int, dict] = {}
+        self._integrity_idle_since: float | None = None
+
     @classmethod
     def get_instance(cls) -> "QueueWorker":
         if cls._instance is None:
             cls._instance = cls()
         return cls._instance
-    
+
     def _get_root(self, side: str) -> Path:
         if side == "local":
             return self.settings.local_models_root
-        return self.settings.lake_models_root
-    
+        if side == "lake":
+            return self.settings.lake_models_root
+        raise ValueError(f"Unknown queue side: {side}")
+
+    def _resolve_path(self, side: str, relpath: str) -> Path:
+        path, _ = resolve_queue_path(self._get_root(side), relpath)
+        return path
+
     async def start(self):
-        """Start the worker loop."""
+        """Start the scheduler loop."""
         if QueueWorker._running:
             return
+        await self._recover_interrupted_tasks()
         QueueWorker._running = True
-        print("✓ Queue worker started")
-        asyncio.create_task(self._worker_loop())
-    
+        self._scheduler_task = asyncio.create_task(self._worker_loop(), name="queue-scheduler")
+        print(
+            "✓ Queue scheduler started "
+            f"(transfers={max(1, self.settings.queue_concurrency)}, "
+            f"cleanup={max(1, self.settings.queue_cleanup_concurrency)}, integrity=idle-only)"
+        )
+
+    async def _recover_interrupted_tasks(self) -> None:
+        """Requeue work left running by an unclean single-process shutdown."""
+        async with get_db() as db:
+            await db.execute(
+                """
+                UPDATE queue
+                SET status = 'pending', started_at = NULL, completed_at = NULL,
+                    error_message = NULL
+                WHERE status = 'running'
+                """
+            )
+            await db.commit()
+
     async def stop(self):
-        """Stop the worker loop."""
+        """Stop scheduling and cooperatively cancel active work."""
         QueueWorker._running = False
-        print("Queue worker stopped")
-    
+        self.abort_all_tasks()
+        if self._scheduler_task:
+            await self._scheduler_task
+            self._scheduler_task = None
+        if self._active:
+            await asyncio.gather(
+                *(execution["task"] for execution in list(self._active.values())),
+                return_exceptions=True,
+            )
+        print("Queue scheduler stopped")
+
     @classmethod
     def pause(cls):
         cls._paused = True
-        print("Queue worker paused")
-    
+        print("Queue scheduler paused")
+
     @classmethod
     def resume(cls):
         cls._paused = False
-        print("Queue worker resumed")
-    
+        print("Queue scheduler resumed")
+
     @classmethod
     def is_paused(cls) -> bool:
         return cls._paused
 
+    def request_task_cancellation(self, task_id: int) -> str | None:
+        """Request cancellation without racing an irreversible filesystem commit."""
+        execution = self._active.get(task_id)
+        if not execution:
+            return None
+        if execution.get("commit_started"):
+            return "too_late"
+        execution["cancel_event"].set()
+        return "requested"
+
+    def cancel_task(self, task_id: int) -> bool:
+        """Compatibility wrapper for callers that only need accepted/rejected."""
+        return self.request_task_cancellation(task_id) == "requested"
+
+    def abort_all_tasks(self) -> tuple[int, int]:
+        """Signal cancellable work and report irreversible work separately."""
+        requested = 0
+        too_late = 0
+        for execution in self._active.values():
+            if execution.get("commit_started"):
+                too_late += 1
+                continue
+            execution["cancel_event"].set()
+            requested += 1
+        return requested, too_late
+
     @classmethod
     def abort_current_task(cls):
-        """Signal the current task to abort."""
-        if cls._current_task_id:
-            cls._abort_current_task = True
-            print(f"Aborting task {cls._current_task_id}")
-    
+        """Backward-compatible alias: concurrency means abort every active task."""
+        if cls._instance:
+            cls._instance.abort_all_tasks()
+
     async def _worker_loop(self):
-        """Main worker loop - continuously process queue tasks."""
+        """Continuously claim the maximal safe set of runnable tasks."""
         while QueueWorker._running:
             try:
-                if not QueueWorker._paused:
-                    task = await self._get_next_task()
-                    if task:
-                        await self._process_task(task)
-                    else:
-                        # No tasks, wait a bit before checking again
-                        await asyncio.sleep(1)
-                else:
-                    # Paused, check less frequently
-                    await asyncio.sleep(2)
-            except Exception as e:
-                print(f"Queue worker error: {e}")
-                await asyncio.sleep(5)
-    
-    async def _get_next_task(self) -> dict | None:
-        """Get the next pending task from the queue."""
+                if QueueWorker._paused:
+                    await asyncio.sleep(max(0.1, self.settings.queue_scheduler_poll_seconds))
+                    continue
+
+                pending = await self._get_pending_tasks()
+                roots = {
+                    "local": self.settings.local_models_root,
+                    "lake": self.settings.lake_models_root,
+                }
+                selected = select_runnable_tasks(
+                    pending=pending,
+                    active=list(self._active.values()),
+                    roots=roots,
+                    lane_limits={
+                        LANE_TRANSFER: max(1, self.settings.queue_concurrency),
+                        LANE_CLEANUP: max(1, self.settings.queue_cleanup_concurrency),
+                    },
+                )
+                selected = await self._apply_integrity_idle_policy(pending, selected)
+
+                for task in selected:
+                    if await self._claim_task(task["id"]):
+                        self._launch_task(task, roots)
+
+                await asyncio.sleep(max(0.05, self.settings.queue_scheduler_poll_seconds))
+            except Exception as exc:
+                print(f"Queue scheduler error: {exc}")
+                await asyncio.sleep(1)
+
+    async def _apply_integrity_idle_policy(
+        self,
+        pending: list[dict],
+        selected: list[dict],
+    ) -> list[dict]:
+        """Require a quiet window before starting globally-exclusive disk work."""
+        normal_pending = any(task_lane(task) != LANE_INTEGRITY for task in pending)
+        normal_active = any(
+            execution["lane"] != LANE_INTEGRITY for execution in self._active.values()
+        )
+        integrity_active = any(
+            execution["lane"] == LANE_INTEGRITY for execution in self._active.values()
+        )
+        downloads_busy = await self._has_active_downloads()
+
+        if integrity_active:
+            if normal_pending or downloads_busy:
+                self._integrity_idle_since = None
+                for execution in self._active.values():
+                    if execution["lane"] == LANE_INTEGRITY:
+                        execution["requeue_on_cancel"] = True
+                        execution["cancel_event"].set()
+            return []
+
+        if normal_pending or normal_active:
+            self._integrity_idle_since = None
+            return selected
+
+        if downloads_busy:
+            self._integrity_idle_since = None
+            return []
+
+        now = time.monotonic()
+        if self._integrity_idle_since is None:
+            self._integrity_idle_since = now
+
+        if selected and task_lane(selected[0]) == LANE_INTEGRITY:
+            idle_for = now - self._integrity_idle_since
+            if idle_for < max(0.0, self.settings.queue_integrity_idle_seconds):
+                return []
+        return selected
+
+    async def _has_active_downloads(self) -> bool:
+        """Keep integrity I/O idle while model downloads are queued or running."""
+        try:
+            async with get_db() as db:
+                cursor = await db.execute(
+                    "SELECT 1 FROM download_jobs WHERE status IN ('queued', 'running') LIMIT 1"
+                )
+                return await cursor.fetchone() is not None
+        except sqlite3.OperationalError:
+            # Small isolated test databases may only define the queue table.
+            return False
+
+    async def _get_pending_tasks(self) -> list[dict]:
         async with get_db() as db:
             cursor = await db.execute(
-                "SELECT * FROM queue WHERE status = 'pending' ORDER BY created_at ASC LIMIT 1"
+                "SELECT * FROM queue WHERE status = 'pending' ORDER BY created_at ASC, id ASC"
+            )
+            return [dict(row) for row in await cursor.fetchall()]
+
+    async def _claim_task(self, task_id: int) -> bool:
+        """Atomically claim work, including the download/integrity exclusion."""
+        async with get_db() as db:
+            await db.execute("BEGIN IMMEDIATE")
+            cursor = await db.execute(
+                "SELECT task_type FROM queue WHERE id = ? AND status = 'pending'",
+                (task_id,),
             )
             row = await cursor.fetchone()
-            if row:
-                return dict(row)
-        return None
-    
-    async def _process_task(self, task: dict):
-        """Process a single queue task."""
-        task_id = task["id"]
-        QueueWorker._current_task_id = task_id
-        QueueWorker._abort_current_task = False
-        
-        try:
-            # Mark as running
-            async with get_db() as db:
-                await db.execute(
-                    "UPDATE queue SET status = 'running', started_at = ? WHERE id = ?",
-                    (datetime.now(timezone.utc).isoformat(), task_id)
-                )
-                await db.commit()
-            
-            # Broadcast status
-            await broadcast("task_started", {"task_id": task_id, "task_type": task["task_type"]})
-            
-            if task["task_type"] == "copy":
-                await self._execute_copy(task)
-            elif task["task_type"] == "move":
-                await self._execute_move(task)
-            elif task["task_type"] == "delete":
-                await self._execute_delete(task)
-            elif task["task_type"] == "verify":
-                await self._execute_verify(task)
-            elif task["task_type"] == "hash_file":
-                await self._execute_hash_file(task)
-            elif task["task_type"] == "dedupe_scan":
-                from app.services.dedupe import DedupeService
-                import json
-                
-                # Parse config from dst_side
-                try:
-                    config = json.loads(task["dst_side"])
-                    mode = config.get("mode", "full")
-                    min_size = config.get("min_size", 0)
-                except (json.JSONDecodeError, TypeError):
-                    # Fallback for legacy or plain string
-                    mode = task["dst_side"] if task["dst_side"] in ("full", "fast") else "full"
-                    min_size = 0
-                
-                # Check abort before starting heavy scan? 
-                # Dedupe scan is implemented in another service, checking abort there is harder without passing the worker.
-                # For now we assume dedupe scan is atomic or handles itself, but user said "halt... work in que".
-                # We can update DedupeService later if needed, but for now let's focus on copy/verify.
-                result = await DedupeService().execute_scan(task_id=task_id, side=task["src_side"], mode=mode, min_size_bytes=min_size)
-                
-                await broadcast("task_complete", {
-                    "task_id": task_id, 
-                    "status": "completed", 
-                    "result": result
-                })
-            
-            # Check if aborted during execution (and wasn't raised as exception)
-            if QueueWorker._abort_current_task:
-                 raise asyncio.CancelledError("Task aborted by user")
+            if row is None:
+                await db.rollback()
+                return False
 
-            # Mark as completed
+            if row[0] in {"hash_file", "verify", "dedupe_scan"}:
+                cursor = await db.execute(
+                    """
+                    SELECT 1 FROM download_jobs
+                    WHERE status IN ('queued', 'running')
+                    LIMIT 1
+                    """
+                )
+                if await cursor.fetchone() is not None:
+                    await db.rollback()
+                    return False
+
+            cursor = await db.execute(
+                """
+                UPDATE queue
+                SET status = 'running', started_at = ?, completed_at = NULL,
+                    error_message = NULL
+                WHERE id = ? AND status = 'pending'
+                """,
+                (datetime.now(timezone.utc).isoformat(), task_id),
+            )
+            await db.commit()
+            return cursor.rowcount == 1
+
+    def _launch_task(self, task: dict, roots: dict[str, Path]) -> None:
+        task_id = int(task["id"])
+        execution = {
+            "lane": task_lane(task),
+            "resources": task_resources(task, roots),
+            "cancel_event": asyncio.Event(),
+            "requeue_on_cancel": False,
+            "commit_started": False,
+        }
+        execution["task"] = asyncio.create_task(
+            self._run_claimed_task(task),
+            name=f"queue-{task['task_type']}-{task_id}",
+        )
+        self._active[task_id] = execution
+
+    def _is_cancelled(self, task_id: int) -> bool:
+        execution = self._active.get(task_id)
+        return (
+            not QueueWorker._running
+            or execution is None
+            or execution["cancel_event"].is_set()
+        )
+
+    def _raise_if_cancelled(self, task_id: int) -> None:
+        if self._is_cancelled(task_id):
+            raise asyncio.CancelledError(f"Task {task_id} cancelled")
+
+    def _begin_irreversible_commit(self, task_id: int) -> None:
+        self._raise_if_cancelled(task_id)
+        execution = self._active.get(task_id)
+        if execution is None:
+            raise asyncio.CancelledError(f"Task {task_id} cancelled")
+        execution["commit_started"] = True
+
+    async def _set_operation_phase(self, task_id: int, phase: str) -> None:
+        async with get_db() as db:
+            await db.execute(
+                "UPDATE queue SET operation_phase = ? WHERE id = ? AND status = 'running'",
+                (phase, task_id),
+            )
+            await db.commit()
+
+    async def _run_claimed_task(self, task: dict):
+        """Execute a task that has already been atomically claimed."""
+        task_id = int(task["id"])
+        try:
+            await broadcast("task_started", {"task_id": task_id, "task_type": task["task_type"]})
+            await self._execute_task_body(task)
+
+            execution = self._active.get(task_id)
+            if (
+                execution
+                and not execution.get("commit_started")
+                and execution["cancel_event"].is_set()
+            ):
+                raise asyncio.CancelledError(f"Task {task_id} cancelled before completion")
+            if execution:
+                # No await between the last cancellation check and closing the
+                # cancellation window: API requests now receive "too_late".
+                execution["commit_started"] = True
+
             async with get_db() as db:
-                await db.execute(
-                    "UPDATE queue SET status = 'completed', completed_at = ? WHERE id = ?",
-                    (datetime.now(timezone.utc).isoformat(), task_id)
+                cursor = await db.execute(
+                    """
+                    UPDATE queue SET status = 'completed', completed_at = ?,
+                        operation_phase = 'completed'
+                    WHERE id = ? AND status = 'running'
+                    """,
+                    (datetime.now(timezone.utc).isoformat(), task_id),
                 )
                 await db.commit()
-            
-            # Broadcast completion with task details for immediate UI update
+            if cursor.rowcount != 1:
+                return
+
             await broadcast("task_complete", {
-                "task_id": task_id, 
+                "task_id": task_id,
                 "status": "completed",
                 "task_type": task["task_type"],
                 "src_relpath": task.get("src_relpath"),
@@ -176,160 +354,232 @@ class QueueWorker:
                 "src_side": task.get("src_side"),
                 "dst_side": task.get("dst_side"),
             })
-            
+
         except asyncio.CancelledError:
-            # Task was cancelled
+            execution = self._active.get(task_id)
+            should_requeue = bool(
+                QueueWorker._running
+                and execution
+                and execution.get("requeue_on_cancel")
+            )
+            if should_requeue:
+                async with get_db() as db:
+                    cursor = await db.execute(
+                        """
+                        UPDATE queue
+                        SET status = 'pending', started_at = NULL, completed_at = NULL,
+                            bytes_transferred = 0, error_message = NULL
+                        WHERE id = ? AND status = 'running'
+                        """,
+                        (task_id,),
+                    )
+                    await db.commit()
+                if cursor.rowcount == 1:
+                    await broadcast("task_deferred", {
+                        "task_id": task_id,
+                        "status": "pending",
+                        "task_type": task["task_type"],
+                        "reason": "higher_priority_io",
+                    })
+                    return
+
             async with get_db() as db:
                 await db.execute(
-                    "UPDATE queue SET status = 'cancelled', completed_at = ? WHERE id = ?",
-                    (datetime.now(timezone.utc).isoformat(), task_id)
+                    """
+                    UPDATE queue SET status = 'cancelled', completed_at = ?
+                    WHERE id = ? AND status = 'running'
+                    """,
+                    (datetime.now(timezone.utc).isoformat(), task_id),
                 )
                 await db.commit()
-            
-        except Exception as e:
-            # Task failed
-            error_msg = str(e)
+            await broadcast("task_complete", {
+                "task_id": task_id,
+                "status": "cancelled",
+                "task_type": task["task_type"],
+            })
+
+        except Exception as exc:
+            error_msg = str(exc)
             print(f"Task {task_id} failed: {error_msg}")
-            
             async with get_db() as db:
-                await db.execute(
-                    """UPDATE queue SET 
-                        status = 'failed', 
-                        error_message = ?, 
-                        completed_at = ?,
+                cursor = await db.execute(
+                    """UPDATE queue SET
+                        status = 'failed', error_message = ?, completed_at = ?,
                         retry_count = retry_count + 1
-                    WHERE id = ?""",
-                    (error_msg, datetime.now(timezone.utc).isoformat(), task_id)
+                    WHERE id = ? AND status = 'running'""",
+                    (error_msg, datetime.now(timezone.utc).isoformat(), task_id),
                 )
                 await db.commit()
-            
-            await broadcast("task_complete", {"task_id": task_id, "status": "failed", "error": error_msg})
-        
+            if cursor.rowcount == 1:
+                await broadcast("task_complete", {
+                    "task_id": task_id,
+                    "status": "failed",
+                    "task_type": task["task_type"],
+                    "error": error_msg,
+                })
         finally:
-            QueueWorker._current_task_id = None
+            self._active.pop(task_id, None)
+
+    async def _execute_task_body(self, task: dict) -> None:
+        task_id = int(task["id"])
+        self._raise_if_cancelled(task_id)
+
+        if task["task_type"] == "copy":
+            await self._execute_copy(task)
+        elif task["task_type"] == "move":
+            await self._execute_move(task)
+        elif task["task_type"] == "delete":
+            await self._execute_delete(task)
+        elif task["task_type"] == "verify":
+            await self._execute_verify(task)
+        elif task["task_type"] == "hash_file":
+            await self._execute_hash_file(task)
+        elif task["task_type"] == "dedupe_scan":
+            import json
+
+            from app.services.dedupe import DedupeService
+
+            try:
+                config = json.loads(task["dst_side"])
+                mode = config.get("mode", "full")
+                min_size = config.get("min_size", 0)
+            except (json.JSONDecodeError, TypeError):
+                mode = task["dst_side"] if task["dst_side"] in ("full", "fast") else "full"
+                min_size = 0
+
+            await DedupeService().execute_scan(
+                task_id=task_id,
+                side=task["src_side"],
+                mode=mode,
+                min_size_bytes=min_size,
+                cancel_check=lambda: self._is_cancelled(task_id),
+            )
+        else:
+            raise ValueError(f"Unsupported queue task type: {task['task_type']}")
     
     async def _execute_copy(self, task: dict):
-        """Execute a copy task."""
+        """Copy through a same-directory staging file, then atomically commit."""
         import blake3
-        from datetime import datetime, timezone
-        import time
         
-        src_root = self._get_root(task["src_side"])
-        dst_root = self._get_root(task["dst_side"])
+        src_path = self._resolve_path(task["src_side"], task["src_relpath"])
+        dst_path = self._resolve_path(task["dst_side"], task["dst_relpath"])
         
-        src_path = src_root / task["src_relpath"].replace("/", "\\")
-        dst_path = dst_root / task["dst_relpath"].replace("/", "\\")
-        
-        if not src_path.exists():
+        if not src_path.exists() or not src_path.is_file():
             raise FileNotFoundError(f"Source file not found: {src_path}")
         
-        # Create destination directory if needed
         dst_path.parent.mkdir(parents=True, exist_ok=True)
-        
-        # Get file size for progress
+        task_id = int(task["id"])
+        staging_path = dst_path.with_name(f".{dst_path.name}.cmm-{task_id}.part")
+        if staging_path.exists():
+            staging_path.unlink()
+
         file_size = src_path.stat().st_size
         bytes_copied = 0
-        task_id = task["id"]
-        
-        # Hash while copying
         hasher = blake3.blake3()
-        
-        # Copy with progress and compute hash
         chunk_size = 1024 * 1024  # 1MB chunks
         last_db_update_time = 0
-        
-        async with aiofiles.open(src_path, 'rb') as src_file:
-            async with aiofiles.open(dst_path, 'wb') as dst_file:
-                while True:
-                    if QueueWorker._abort_current_task:
-                        # Clean up partial file
-                        try:
-                            dst_path.unlink()
-                        except:
-                            pass
-                        raise asyncio.CancelledError("Task aborted")
 
-                    chunk = await src_file.read(chunk_size)
-                    if not chunk:
-                        break
-                    await dst_file.write(chunk)
-                    hasher.update(chunk)
-                    bytes_copied += len(chunk)
-                    
-                    # Update progress in DB and broadcast
-                    progress_pct = int((bytes_copied / file_size) * 100) if file_size > 0 else 100
-                    
-                    # Throttle DB updates to every 1 second or completion to avoid locking
-                    current_time = time.time()
-                    if current_time - last_db_update_time > 1.0 or bytes_copied == file_size:
-                        async with get_db() as db:
-                            await db.execute(
-                                "UPDATE queue SET bytes_transferred = ? WHERE id = ?",
-                                (bytes_copied, task_id)
-                            )
-                            await db.commit()
-                        last_db_update_time = current_time
-                    
-                    # Broadcast progress (throttled to every 10% or completion)
-                    if (progress_pct % 10 == 0 and progress_pct > 0) or bytes_copied == file_size:
-                        await broadcast("queue_progress", {
-                            "task_id": task_id,
-                            "bytes_transferred": bytes_copied,
-                            "total_bytes": file_size,
-                            "progress_pct": progress_pct,
-                        })
-        
-        # Compute final hash
-        file_hash = hasher.hexdigest()
-        now = datetime.now(timezone.utc).isoformat()
-        
-        # Preserve file times (sync call is fine, very fast)
-        import os
-        src_stat = src_path.stat()
-        os.utime(dst_path, (src_stat.st_atime, src_stat.st_mtime))
-        dst_stat = dst_path.stat()
-        
-        # Update file_index with hash for both source and destination
-        async with get_db() as db:
-            # Update source file hash
-            await db.execute(
-                """
-                UPDATE file_index SET hash = ?, hash_computed_at = ?
-                WHERE side = ? AND relpath = ?
-                """,
-                (file_hash, now, task["src_side"], task["src_relpath"])
-            )
-            # Update destination file hash
-            await db.execute(
-                """
-                INSERT OR REPLACE INTO file_index (side, relpath, size, mtime_ns, hash, hash_computed_at, indexed_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-                """,
-                (task["dst_side"], task["dst_relpath"], dst_stat.st_size, dst_stat.st_mtime_ns, file_hash, now, now)
-            )
-            await db.commit()
-        
-        print(f"Copied: {task['src_relpath']} → {task['dst_side']} (hash: {file_hash[:8]}...)")
+        try:
+            async with aiofiles.open(src_path, "rb") as src_file:
+                async with aiofiles.open(staging_path, "wb") as dst_file:
+                    while True:
+                        self._raise_if_cancelled(task_id)
+                        chunk = await src_file.read(chunk_size)
+                        if not chunk:
+                            break
+                        await dst_file.write(chunk)
+                        hasher.update(chunk)
+                        bytes_copied += len(chunk)
+
+                        progress_pct = int((bytes_copied / file_size) * 100) if file_size > 0 else 100
+                        current_time = time.time()
+                        if current_time - last_db_update_time > 1.0 or bytes_copied == file_size:
+                            async with get_db() as db:
+                                await db.execute(
+                                    "UPDATE queue SET bytes_transferred = ? WHERE id = ? AND status = 'running'",
+                                    (bytes_copied, task_id),
+                                )
+                                await db.commit()
+                            last_db_update_time = current_time
+
+                        if (progress_pct % 10 == 0 and progress_pct > 0) or bytes_copied == file_size:
+                            await broadcast("queue_progress", {
+                                "task_id": task_id,
+                                "bytes_transferred": bytes_copied,
+                                "total_bytes": file_size,
+                                "progress_pct": progress_pct,
+                            })
+
+            self._begin_irreversible_commit(task_id)
+            await self._set_operation_phase(task_id, "committing")
+            file_hash = hasher.hexdigest()
+            now = datetime.now(timezone.utc).isoformat()
+            src_stat = src_path.stat()
+            os.utime(staging_path, (src_stat.st_atime, src_stat.st_mtime))
+            os.replace(staging_path, dst_path)
+            dst_stat = dst_path.stat()
+
+            async with get_db() as db:
+                await db.execute(
+                    """
+                    UPDATE file_index SET hash = ?, hash_computed_at = ?
+                    WHERE side = ? AND relpath = ?
+                    """,
+                    (file_hash, now, task["src_side"], task["src_relpath"]),
+                )
+                await db.execute(
+                    """
+                    INSERT OR REPLACE INTO file_index
+                    (side, relpath, size, mtime_ns, hash, hash_computed_at, indexed_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        task["dst_side"], task["dst_relpath"], dst_stat.st_size,
+                        dst_stat.st_mtime_ns, file_hash, now, now,
+                    ),
+                )
+                await db.commit()
+
+            print(f"Copied: {task['src_relpath']} → {task['dst_side']} (hash: {file_hash[:8]}...)")
+        finally:
+            if staging_path.exists():
+                try:
+                    staging_path.unlink()
+                except OSError:
+                    pass
 
     async def _execute_move(self, task: dict):
-        """Execute a move task within a side."""
-        import os
-
+        """Execute or recover an atomic move within one storage side."""
+        task_id = int(task["id"])
         src_root = self._get_root(task["src_side"])
         dst_root = self._get_root(task["dst_side"])
         if src_root != dst_root:
             raise ValueError("Move must be within the same side")
 
-        src_path = src_root / task["src_relpath"].replace("/", "\\")
-        dst_path = dst_root / task["dst_relpath"].replace("/", "\\")
+        src_path = self._resolve_path(task["src_side"], task["src_relpath"])
+        dst_path = self._resolve_path(task["dst_side"], task["dst_relpath"])
 
-        if not src_path.exists():
-            raise FileNotFoundError(f"Source file not found: {src_path}")
-        if dst_path.exists():
-            raise FileExistsError(f"Destination already exists: {dst_path}")
+        recovering_commit = (
+            task.get("operation_phase") == "committing"
+            and not src_path.exists()
+            and dst_path.is_file()
+        )
 
-        dst_path.parent.mkdir(parents=True, exist_ok=True)
-        await aiofiles.os.rename(src_path, dst_path)
+        if recovering_commit:
+            execution = self._active.get(task_id)
+            if execution:
+                execution["commit_started"] = True
+            print(f"Recovering committed move: {task['src_relpath']} → {task['dst_relpath']}")
+        else:
+            if not src_path.exists() or not src_path.is_file():
+                raise FileNotFoundError(f"Source file not found: {src_path}")
+            if dst_path.exists():
+                raise FileExistsError(f"Destination already exists: {dst_path}")
+
+            self._begin_irreversible_commit(task_id)
+            await self._set_operation_phase(task_id, "committing")
+            dst_path.parent.mkdir(parents=True, exist_ok=True)
+            await aiofiles.os.rename(src_path, dst_path)
 
         # Update index entry (preserve hash) and relpath-based source URLs
         now = datetime.now(timezone.utc).isoformat()
@@ -388,13 +638,18 @@ class QueueWorker:
     
     async def _execute_delete(self, task: dict):
         """Execute a delete task."""
-        root = self._get_root(task["dst_side"])
-        filepath = root / task["dst_relpath"].replace("/", "\\")
+        task_id = int(task["id"])
+        self._raise_if_cancelled(task_id)
+        filepath = self._resolve_path(task["dst_side"], task["dst_relpath"])
         
         if not filepath.exists():
             print(f"File already deleted: {filepath}")
             return
-        
+
+        if not filepath.is_file():
+            raise ValueError(f"Delete target is not a file: {filepath}")
+        self._begin_irreversible_commit(task_id)
+        await self._set_operation_phase(task_id, "committing")
         await aiofiles.os.remove(filepath)
         print(f"Deleted: {task['dst_relpath']} from {task['dst_side']}")
 
@@ -493,13 +748,11 @@ class QueueWorker:
         verified_count = 0
         
         for i, row in enumerate(candidate_files):
-            # Check for cancellation
-            if not QueueWorker._running or QueueWorker._abort_current_task: 
-                break
+            self._raise_if_cancelled(int(task_id))
                 
             file_relpath = row["relpath"]
-            local_path = self.settings.local_models_root / file_relpath.replace("/", "\\")
-            lake_path = self.settings.lake_models_root / file_relpath.replace("/", "\\")
+            local_path = self._resolve_path("local", file_relpath)
+            lake_path = self._resolve_path("lake", file_relpath)
             
             # Broadcast verify progress (reusing fields creatively or adding custom payload)
             # We can use 'queue_progress' but UI needs to interpret it.
@@ -537,6 +790,7 @@ class QueueWorker:
                     hasher = blake3.blake3()
                     async with aiofiles.open(local_path, 'rb') as f:
                         while chunk := await f.read(1024 * 1024):
+                            self._raise_if_cancelled(int(task_id))
                             hasher.update(chunk)
                     local_hash = hasher.hexdigest()
                     updates.append(("local", local_hash))
@@ -545,6 +799,7 @@ class QueueWorker:
                     hasher = blake3.blake3()
                     async with aiofiles.open(lake_path, 'rb') as f:
                         while chunk := await f.read(1024 * 1024):
+                            self._raise_if_cancelled(int(task_id))
                             hasher.update(chunk)
                     lake_hash = hasher.hexdigest()
                     updates.append(("lake", lake_hash))
@@ -569,21 +824,21 @@ class QueueWorker:
     async def _execute_hash_file(self, task: dict):
         """Execute a single file hash task."""
         import blake3
-        import time
         
         relpath = task["src_relpath"]
         task_id = task["id"]
         
         print(f"Hashing file: {relpath}")
         
-        local_path = self.settings.local_models_root / relpath.replace("/", "\\")
-        lake_path = self.settings.lake_models_root / relpath.replace("/", "\\")
+        local_path = self._resolve_path("local", relpath)
+        lake_path = self._resolve_path("lake", relpath)
         
         now = datetime.now(timezone.utc).isoformat()
         computed_hash = None
         
         # Hash whichever side(s) exist
         for side, path in [("local", local_path), ("lake", lake_path)]:
+            self._raise_if_cancelled(int(task_id))
             if path.exists():
                 # Check if already hashed
                 async with get_db() as db:
@@ -612,9 +867,7 @@ class QueueWorker:
                 
                 async with aiofiles.open(path, 'rb') as f:
                     while chunk := await f.read(1024 * 1024):
-                        if QueueWorker._abort_current_task:
-                            raise asyncio.CancelledError("Task aborted")
-
+                        self._raise_if_cancelled(int(task_id))
                         hasher.update(chunk)
                         bytes_read += len(chunk)
                         

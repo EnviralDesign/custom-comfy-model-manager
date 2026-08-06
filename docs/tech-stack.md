@@ -63,7 +63,7 @@ Alternative (acceptable for earliest prototype):
 - Persistent cache to avoid re-hashing unchanged files
 
 ### Transfers
-- Queue-based transfers (serial by default)
+- Concurrent queue lanes with per-path ordering and idle-only integrity work
 - File copy + folder copy expansion
 - Mirror plans generate a list of copy/delete tasks
 - Range-capable streaming for Phase 2 remote pulls
@@ -115,8 +115,15 @@ Required (Phase 1):
 - `LOCAL_ALLOW_DELETE`
 - `LAKE_ALLOW_DELETE`
 - `QUEUE_CONCURRENCY`
+- `QUEUE_CLEANUP_CONCURRENCY`
+- `QUEUE_SCHEDULER_POLL_SECONDS`
+- `QUEUE_INTEGRITY_IDLE_SECONDS`
 - `QUEUE_RETRY_COUNT`
 - `APP_DATA_DIR`
+
+The queue scheduler supports one `app.main` process. Do not launch it with multiple
+Uvicorn workers; per-path task ownership is process-local. A separate downloader
+process is supported because its integrity exclusion uses an atomic SQLite gate.
 
 Required (Phase 2):
 - `REMOTE_BASE_URL`

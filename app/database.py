@@ -44,7 +44,8 @@ CREATE TABLE IF NOT EXISTS queue (
     created_at TEXT NOT NULL,
     started_at TEXT,
     completed_at TEXT,
-    verify_folder TEXT
+    verify_folder TEXT,
+    operation_phase TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_queue_status ON queue(status);
@@ -191,6 +192,10 @@ async def init_db(db_path: Path) -> None:
         cols = {row[1] for row in await cursor.fetchall()}
         if "root_type" not in cols:
             await db.execute("ALTER TABLE bundle_assets ADD COLUMN root_type TEXT NOT NULL DEFAULT 'models'")
+        cursor = await db.execute("PRAGMA table_info(queue)")
+        queue_cols = {row[1] for row in await cursor.fetchall()}
+        if "operation_phase" not in queue_cols:
+            await db.execute("ALTER TABLE queue ADD COLUMN operation_phase TEXT")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_bundle_assets_root_relpath ON bundle_assets(root_type, relpath)")
         await db.commit()
 
@@ -247,7 +252,8 @@ async def startup_db() -> None:
                     created_at TEXT NOT NULL,
                     started_at TEXT,
                     completed_at TEXT,
-                    verify_folder TEXT
+                    verify_folder TEXT,
+                    operation_phase TEXT
                 );
                 """)
                 

@@ -1,9 +1,10 @@
 """Dedupe service for finding and removing duplicate files."""
 
 import uuid
-from pathlib import Path
 from datetime import datetime, timezone
-from typing import Literal
+from pathlib import Path
+from typing import Callable, Literal
+
 from pydantic import BaseModel
 
 from app.config import get_settings
@@ -79,16 +80,24 @@ class DedupeService:
                 }
         return None
 
-    async def execute_scan(self, task_id: int, side: Literal["local", "lake"], mode: Literal["full", "fast"] = "full", min_size_bytes: int = 0) -> dict:
+    async def execute_scan(
+        self,
+        task_id: int,
+        side: Literal["local", "lake"],
+        mode: Literal["full", "fast"] = "full",
+        min_size_bytes: int = 0,
+        cancel_check: Callable[[], bool] | None = None,
+    ) -> dict:
         """Execute a dedupe scan task (called by worker)."""
         scan_id = str(uuid.uuid4())
         now = datetime.now(timezone.utc).isoformat()
         hasher = HasherService()
         
         # Helper for progress
+        import time
+
         from app.database import get_db
         from app.websocket import broadcast
-        import time
         
         last_update = 0
         
@@ -118,7 +127,17 @@ class DedupeService:
 
         # First, hash all files that don't have hashes (respecting min size)
         # We pass side as loop identifier, but hasher handles just that side
-        count_pending = await hasher.hash_all_pending(side, progress_callback=progress_cb, mode=mode, min_size_bytes=min_size_bytes)
+        await hasher.hash_all_pending(
+            side,
+            progress_callback=progress_cb,
+            mode=mode,
+            min_size_bytes=min_size_bytes,
+            cancel_check=cancel_check,
+        )
+
+        if cancel_check and cancel_check():
+            import asyncio
+            raise asyncio.CancelledError("Dedupe scan cancelled")
         
         # Find duplicates by grouping by hash
         async with get_db() as db:
@@ -132,6 +151,9 @@ class DedupeService:
             reclaimable = 0
             
             for hash_val in dup_hashes:
+                if cancel_check and cancel_check():
+                    import asyncio
+                    raise asyncio.CancelledError("Dedupe scan cancelled")
                 cursor = await db.execute(
                     "SELECT relpath, size, mtime_ns FROM file_index WHERE side = ? AND hash = ?", # Hash match implies size match generally, but for safety no extra filter needed here if hash is robust
                     (side, hash_val)

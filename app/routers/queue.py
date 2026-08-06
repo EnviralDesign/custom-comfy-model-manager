@@ -1,8 +1,9 @@
 """Queue API endpoints for transfer operations."""
 
+from typing import Literal
+
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
-from typing import Literal
 
 from app.services.queue import QueueService, QueueTask
 
@@ -75,9 +76,16 @@ async def get_tasks():
 
 @router.get("/active", response_model=QueueTask | None)
 async def get_active_task():
-    """Get the currently running task, if any."""
+    """Compatibility view returning one running task, if any."""
     queue_service = QueueService()
     return await queue_service.get_active_task()
+
+
+@router.get("/active/all", response_model=list[QueueTask])
+async def get_active_tasks():
+    """Get every concurrently running task."""
+    queue_service = QueueService()
+    return await queue_service.get_active_tasks()
 
 
 @router.post("/copy")
@@ -87,12 +95,15 @@ async def enqueue_copy(request: CopyRequest):
         raise HTTPException(400, "Cannot copy to the same side")
     
     queue_service = QueueService()
-    task_id = await queue_service.enqueue_copy(
-        src_side=request.src_side,
-        src_relpath=request.src_relpath,
-        dst_side=request.dst_side,
-        dst_relpath=request.dst_relpath or request.src_relpath,
-    )
+    try:
+        task_id = await queue_service.enqueue_copy(
+            src_side=request.src_side,
+            src_relpath=request.src_relpath,
+            dst_side=request.dst_side,
+            dst_relpath=request.dst_relpath or request.src_relpath,
+        )
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
     return {"task_id": task_id, "status": "queued"}
 
 
@@ -103,11 +114,14 @@ async def enqueue_delete(request: DeleteRequest):
     Respects allow-delete policy for sync operations.
     """
     queue_service = QueueService()
-    task_id = await queue_service.enqueue_delete(
-        side=request.side,
-        relpath=request.relpath,
-        respect_policy=True,
-    )
+    try:
+        task_id = await queue_service.enqueue_delete(
+            side=request.side,
+            relpath=request.relpath,
+            respect_policy=True,
+        )
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
     return {"task_id": task_id, "status": "queued"}
 
 
@@ -175,19 +189,32 @@ async def resume_queue():
 @router.post("/cancel/all")
 async def cancel_all_tasks():
     """Cancel all pending and running tasks."""
+    from app.services.worker import get_worker
+    running_count, too_late_count = get_worker().abort_all_tasks()
+
     queue_service = QueueService()
-    count = await queue_service.cancel_all_tasks()
-    
-    # Also abort any running task in the worker
-    from app.services.worker import QueueWorker
-    QueueWorker.abort_current_task()
-    
-    return {"status": "cancelled", "count": count}
+    pending_count = await queue_service.cancel_all_tasks()
+    return {
+        "status": (
+            "partially_cancelling"
+            if too_late_count
+            else "cancelling" if running_count else "cancelled"
+        ),
+        "count": pending_count + running_count,
+        "too_late_count": too_late_count,
+    }
 
 
 @router.post("/cancel/{task_id}")
 async def cancel_task(task_id: int):
     """Cancel a specific task."""
+    from app.services.worker import get_worker
+    cancellation = get_worker().request_task_cancellation(task_id)
+    if cancellation == "requested":
+        return {"status": "cancelling"}
+    if cancellation == "too_late":
+        raise HTTPException(409, "Task has begun its irreversible filesystem commit")
+
     queue_service = QueueService()
     success = await queue_service.cancel_task(task_id)
     if not success:

@@ -62,6 +62,9 @@ const App = {
             case 'task_complete':
                 this.loadQueueTasks();  // Reload to remove completed task
                 break;
+            case 'task_deferred':
+                this.loadQueueTasks();  // Integrity yielded to higher-priority I/O
+                break;
             case 'ai_lookup_update':
                 this.loadAiLookupJobs();
                 break;
@@ -180,6 +183,10 @@ const App = {
                 ? Math.round((task.bytes_transferred || 0) / task.size_bytes * 100)
                 : 0;
             const isRunning = task.status === 'running';
+            const isIntegrity = task.task_type === 'hash_file'
+                || task.task_type === 'verify'
+                || task.task_type === 'dedupe_scan';
+            const pendingLabel = isIntegrity ? '💤 Waiting for idle' : '⏳ Pending';
 
             const icon = task.task_type === 'copy'
                 ? '📋'
@@ -203,7 +210,7 @@ const App = {
                     <div class="queue-meta">
                         ${isRunning
                     ? `⚡ ${progress}% • ${this.formatBytes(task.bytes_transferred || 0)} / ${this.formatBytes(task.size_bytes)}`
-                    : `⏳ Pending${task.size_bytes ? ' • ' + this.formatBytes(task.size_bytes) : ''}`}
+                    : `${pendingLabel}${task.size_bytes ? ' • ' + this.formatBytes(task.size_bytes) : ''}`}
                     </div>
                     ${isRunning ? `<div class="queue-progress"><div class="queue-progress-bar" style="width: ${progress}%"></div></div>` : ''}
                 </div>

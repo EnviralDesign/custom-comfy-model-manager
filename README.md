@@ -6,7 +6,7 @@ A Windows localhost tool for managing ComfyUI models across Local (fast SSD) and
 
 - **Two-pane sync browser** - Browse Local and Lake side-by-side
 - **Diff visualization** - See what's missing, same, or conflicting
-- **Queue-based transfers** - Copy files with progress, pause/resume
+- **Concurrent operation queue** - Path-safe transfers and cleanup with progress, pause/resume
 - **Mirror folders** - Make target match source
 - **Dedupe wizard** - Find and delete duplicate files by BLAKE3 hash
 - **AI source lookup** - Grok + Civitai API assisted download URL discovery
@@ -26,6 +26,9 @@ A Windows localhost tool for managing ComfyUI models across Local (fast SSD) and
    ```
    LOCAL_MODELS_ROOT=D:\ComfyUI\models
    LAKE_MODELS_ROOT=Y:\ComfyUI\models
+   QUEUE_CONCURRENCY=2
+   QUEUE_CLEANUP_CONCURRENCY=4
+   QUEUE_INTEGRITY_IDLE_SECONDS=5
    ```
 
 3. **Run the server:**
@@ -35,6 +38,16 @@ A Windows localhost tool for managing ComfyUI models across Local (fast SSD) and
 
 4. **Open browser:**
    http://localhost:8420
+
+Transfers and unrelated cleanup operations run concurrently. Tasks touching the
+same canonical file path retain FIFO ordering. Hash, verify, and dedupe work is
+idle-only: it waits for transfers, cleanup, and downloads, and yields back to
+higher-priority I/O when new work arrives.
+
+Run only one `app.main` server process (do not use Uvicorn's `--workers` option):
+path ownership for queue tasks is coordinated inside that scheduler process. The
+optional standalone downloader may still run separately because download/integrity
+exclusion is coordinated atomically through SQLite.
 
 ## Standalone Downloader
 

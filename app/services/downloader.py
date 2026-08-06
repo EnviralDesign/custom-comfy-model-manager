@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+import sqlite3
 import threading
 import time
 from dataclasses import dataclass, field
@@ -230,33 +231,44 @@ class DownloadManager:
 
     async def _persist_job(self, job: DownloadJob) -> None:
         async with get_db() as db:
-            await db.execute(
-                """
-                INSERT OR REPLACE INTO download_jobs
-                (id, url, filename, provider, status, bytes_downloaded, total_bytes,
-                 created_at, updated_at, error_message, attempts, dest_path, temp_path,
-                 target_root, record_source)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    job.id,
-                    job.url,
-                    job.filename,
-                    job.provider,
-                    job.status,
-                    job.bytes_downloaded,
-                    job.total_bytes,
-                    job.created_at,
-                    job.updated_at,
-                    job.error_message,
-                    job.attempts,
-                    str(job.dest_path) if job.dest_path else None,
-                    str(job.temp_path) if job.temp_path else None,
-                    str(job.target_root) if job.target_root else None,
-                    1 if job.record_source else 0,
-                ),
-            )
+            await db.execute(self._job_upsert_sql(), self._job_db_values(job))
             await db.commit()
+
+    @staticmethod
+    def _job_upsert_sql() -> str:
+        return """
+            INSERT OR REPLACE INTO download_jobs
+            (id, url, filename, provider, status, bytes_downloaded, total_bytes,
+             created_at, updated_at, error_message, attempts, dest_path, temp_path,
+             target_root, record_source)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """
+
+    @staticmethod
+    def _job_db_values(job: DownloadJob) -> tuple:
+        return (
+            job.id,
+            job.url,
+            job.filename,
+            job.provider,
+            job.status,
+            job.bytes_downloaded,
+            job.total_bytes,
+            job.created_at,
+            job.updated_at,
+            job.error_message,
+            job.attempts,
+            str(job.dest_path) if job.dest_path else None,
+            str(job.temp_path) if job.temp_path else None,
+            str(job.target_root) if job.target_root else None,
+            1 if job.record_source else 0,
+        )
+
+    def _persist_job_blocking(self, job: DownloadJob) -> None:
+        """Persist immediately when a following atomic scheduler decision depends on it."""
+        with sqlite3.connect(get_settings().get_db_path(), timeout=5.0) as db:
+            db.execute(self._job_upsert_sql(), self._job_db_values(job))
+            db.commit()
 
     def _persist_job_sync(self, job: DownloadJob) -> None:
         try:
@@ -338,7 +350,7 @@ class DownloadManager:
                 force_start=bool(start_now),
             )
             self._jobs[job_id] = job
-            self._persist_job_sync(job)
+            self._persist_job_blocking(job)
         if start_now:
             self.start_job(job_id, force=True)
         else:
@@ -361,15 +373,50 @@ class DownloadManager:
                     self._persist_job_sync(job)
                     return False
             job.force_start = force
-            self._start_job_locked(job)
-            return True
+            return self._start_job_locked(job)
 
-    def _start_job_locked(self, job: DownloadJob) -> None:
-        job.status = "running"
-        job.updated_at = _now_iso()
+    def _start_job_locked(self, job: DownloadJob) -> bool:
+        """Atomically reserve the download lane against exclusive integrity I/O."""
+        db = None
+        try:
+            db = sqlite3.connect(
+                get_settings().get_db_path(),
+                timeout=5.0,
+                isolation_level=None,
+            )
+            db.execute("BEGIN IMMEDIATE")
+            integrity_running = db.execute(
+                """
+                SELECT 1 FROM queue
+                WHERE status = 'running'
+                  AND task_type IN ('hash_file', 'verify', 'dedupe_scan')
+                LIMIT 1
+                """
+            ).fetchone()
+            if integrity_running is not None:
+                db.rollback()
+                job.status = "queued"
+                job.updated_at = _now_iso()
+                return False
+
+            job.status = "running"
+            job.updated_at = _now_iso()
+            db.execute(self._job_upsert_sql(), self._job_db_values(job))
+            db.commit()
+        except sqlite3.Error as exc:
+            if db is not None:
+                db.rollback()
+            job.status = "queued"
+            job.error_message = f"scheduler_db_error: {exc}"
+            job.updated_at = _now_iso()
+            return False
+        finally:
+            if db is not None:
+                db.close()
+
         self._active.add(job.id)
-        self._persist_job_sync(job)
         threading.Thread(target=self._run_job, args=(job.id,), daemon=True).start()
+        return True
 
     def _scheduler_loop(self) -> None:
         while self._running:

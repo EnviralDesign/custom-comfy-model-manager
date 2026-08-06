@@ -1,10 +1,10 @@
 """BLAKE3 hashing service with caching."""
 
 import asyncio
-from pathlib import Path
-from datetime import datetime, timezone
-from typing import Literal, Callable
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Callable, Literal
 
 import blake3
 
@@ -94,6 +94,7 @@ class HasherService:
         relpath: str,
         force: bool = False,
         mode: Literal["full", "fast"] = "full",
+        cancel_check: Callable[[], bool] | None = None,
     ) -> str | None:
         """
         Get the hash for a file, computing if necessary.
@@ -147,20 +148,28 @@ class HasherService:
         loop = asyncio.get_event_loop()
         
         if mode == "fast":
+            if cancel_check and cancel_check():
+                raise asyncio.CancelledError("Hash cancelled")
             # Compute partial
             raw_hash = await loop.run_in_executor(
                 get_hash_executor(),
                 compute_partial_hash_sync,
                 filepath
             )
+            if cancel_check and cancel_check():
+                raise asyncio.CancelledError("Hash cancelled")
             hash_value = f"fast:{raw_hash}"
         else:
+            def progress_check(_bytes_read: int) -> None:
+                if cancel_check and cancel_check():
+                    raise asyncio.CancelledError("Hash cancelled")
+
             # Compute full
             hash_value = await loop.run_in_executor(
                 get_hash_executor(),
                 compute_hash_sync,
                 filepath,
-                None
+                progress_check if cancel_check else None,
             )
         
         # Update cache
@@ -184,6 +193,7 @@ class HasherService:
         progress_callback: Callable[[int, int, str], None] | None = None,
         mode: Literal["full", "fast"] = "full",
         min_size_bytes: int = 0,
+        cancel_check: Callable[[], bool] | None = None,
     ) -> int:
         """
         Hash all files on a side that don't have a hash yet (or need upgrade).
@@ -210,11 +220,14 @@ class HasherService:
                     (side, min_size_bytes)
                 )
             pending = [row["relpath"] for row in await cursor.fetchall()]
-            pending = [row["relpath"] for row in await cursor.fetchall()]
         
         total = len(pending)
         for i, relpath in enumerate(pending):
-            await self.get_hash(side, relpath, mode=mode)
+            if cancel_check and cancel_check():
+                raise asyncio.CancelledError("Hash scan cancelled")
+            await self.get_hash(side, relpath, mode=mode, cancel_check=cancel_check)
+            if cancel_check and cancel_check():
+                raise asyncio.CancelledError("Hash scan cancelled")
             if progress_callback:
                 if asyncio.iscoroutinefunction(progress_callback):
                     await progress_callback(i + 1, total, relpath)

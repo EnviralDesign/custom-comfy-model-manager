@@ -25,7 +25,10 @@ class Settings(BaseSettings):
     lake_allow_delete: bool = False
     
     # Queue settings
-    queue_concurrency: int = 1
+    queue_concurrency: int = 2
+    queue_cleanup_concurrency: int = 4
+    queue_scheduler_poll_seconds: float = 0.25
+    queue_integrity_idle_seconds: float = 5.0
     queue_retry_count: int = 3
     
     # Hashing

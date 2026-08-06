@@ -198,6 +198,20 @@ a:hover {
     color: var(--text-primary);
 }
 
+.btn-view-filter {
+    white-space: nowrap;
+}
+
+.btn-view-filter[aria-pressed="true"] {
+    background: rgba(99, 102, 241, 0.16);
+    border-color: var(--accent);
+    color: var(--accent-hover);
+}
+
+.btn-view-filter[aria-pressed="true"]::before {
+    content: "✓";
+}
+
 .btn-ai {
     background: rgba(245, 158, 11, 0.15);
     border-color: rgba(245, 158, 11, 0.5);

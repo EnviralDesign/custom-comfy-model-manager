@@ -22,6 +22,7 @@ const Sync = {
     safetensorsBatchTimer: null,
     dragRelpath: null,
     moveContext: null,
+    localOnly: false,
     minMetricSizeBytes: 5 * 1024 * 1024,
     minAiLookupSizeBytes: 100 * 1024 * 1024,
 
@@ -96,6 +97,7 @@ const Sync = {
         document.getElementById('reclassify-btn')?.addEventListener('click', () => this.reclassifyAllSafetensors());
         document.getElementById('expand-all-btn')?.addEventListener('click', () => this.expandAll());
         document.getElementById('collapse-all-btn')?.addEventListener('click', () => this.collapseAll());
+        document.getElementById('local-only-btn')?.addEventListener('click', () => this.toggleLocalOnly());
 
         // Search with debounce
         let searchTimeout;
@@ -368,7 +370,8 @@ const Sync = {
         const html = this.renderNode(this.treeData, '', filterQuery.toLowerCase(), 0);
 
         if (html.trim() === '') {
-            container.innerHTML = '<div class="empty-state">No files found</div>';
+            const message = this.localOnly ? 'No local files found' : 'No files found';
+            container.innerHTML = `<div class="empty-state">${message}</div>`;
         } else {
             container.innerHTML = html;
         }
@@ -390,8 +393,14 @@ const Sync = {
         for (const folderName of folderNames) {
             const folder = node.children[folderName];
             const folderPath = path ? `${path}/${folderName}` : folderName;
-            // Force expand folders if searching so results are visible
-            const isExpanded = filter ? true : this.expandedFolders.has(folderPath);
+
+            // Local-only mode prunes lake-only branches before rendering them.
+            if (this.localOnly && !this.nodeHasLocalFiles(folder)) {
+                continue;
+            }
+
+            // Force expand folders when filtering so all relevant results are visible.
+            const isExpanded = (filter || this.localOnly) ? true : this.expandedFolders.has(folderPath);
 
             // Count items and derive status metrics for display
             const folderMetrics = this.getFolderMetrics(folder);
@@ -473,6 +482,10 @@ const Sync = {
 
         // Render files
         for (const file of files) {
+            if (this.localOnly && file.local_size === null) {
+                continue;
+            }
+
             // Apply filter
             if (filter && !file.filename.toLowerCase().includes(filter) && !file.relpath.toLowerCase().includes(filter)) {
                 continue;
@@ -550,6 +563,13 @@ const Sync = {
         }
 
         return html;
+    },
+
+    nodeHasLocalFiles(node) {
+        if (node.files.some(file => file.local_size !== null)) {
+            return true;
+        }
+        return Object.values(node.children).some(child => this.nodeHasLocalFiles(child));
     },
 
     countItems(node) {
@@ -1029,6 +1049,16 @@ const Sync = {
 
     search(query) {
         this.render(query);
+    },
+
+    toggleLocalOnly() {
+        this.localOnly = !this.localOnly;
+        const button = document.getElementById('local-only-btn');
+        button?.setAttribute('aria-pressed', String(this.localOnly));
+
+        if (this.treeData) {
+            this.render(document.getElementById('search-input')?.value || '');
+        }
     },
 
     async enqueueCopy(srcSide, relpath, dstSide) {
