@@ -2,6 +2,8 @@
 # requires-python = ">=3.11"
 # dependencies = [
 #     "requests",
+#     "huggingface_hub>=0.32.0",
+#     "hf-xet",
 # ]
 # ///
 
@@ -112,6 +114,12 @@ DEFAULT_COMFY_DIR = "ComfyUI"
 
 # --- IMPORTS ---
 import requests
+
+os.environ.setdefault("HF_XET_HIGH_PERFORMANCE", "1")
+os.environ.setdefault("HF_HUB_DOWNLOAD_TIMEOUT", "45")
+
+from huggingface_hub import hf_hub_download
+from huggingface_hub.utils import tqdm as hf_tqdm
 
 # Lightning workspaces can use overlay/symlinked filesystems and preloaded user
 # site packages. Prefer real venv files and isolate from ambient user packages.
@@ -493,9 +501,9 @@ def get_provider_from_url(url: str) -> str:
     if BASE_HOST and host == BASE_HOST:
         # Treat any local base host URLs as local provider
         return "local"
-    if host.endswith("huggingface.co") or host.endswith("hf.co"):
+    if host in {"huggingface.co", "hf.co"} or host.endswith((".huggingface.co", ".hf.co")):
         return "huggingface"
-    if host.endswith("civitai.com"):
+    if host == "civitai.com" or host.endswith(".civitai.com"):
         return "civitai"
     return "unknown"
 
@@ -512,11 +520,145 @@ def auth_headers_for_source(provider: str, url: str) -> dict:
     if host and BASE_HOST and host == BASE_HOST:
         return {"Authorization": f"Bearer {API_KEY}"}
 
-    if provider == "huggingface" and HF_API_KEY:
+    detected_provider = get_provider_from_url(url)
+    if provider == "huggingface" and detected_provider == "huggingface" and HF_API_KEY:
         return {"Authorization": f"Bearer {HF_API_KEY}"}
-    if provider == "civitai" and CIVITAI_API_KEY:
+    if provider == "civitai" and detected_provider == "civitai" and CIVITAI_API_KEY:
         return {"Authorization": f"Bearer {CIVITAI_API_KEY}"}
     return {}
+
+
+class HuggingFaceDownloadCancelled(RuntimeError):
+    pass
+
+
+def parse_huggingface_file_url(url):
+    try:
+        parsed = urlparse(url)
+    except Exception:
+        return None
+
+    host = (parsed.hostname or "").lower()
+    if host not in {"huggingface.co", "www.huggingface.co", "hf.co", "www.hf.co"}:
+        return None
+
+    from urllib.parse import unquote
+
+    parts = [unquote(part) for part in parsed.path.strip("/").split("/") if part]
+    repo_type = None
+    if parts and parts[0] in {"datasets", "spaces"}:
+        repo_type = "dataset" if parts[0] == "datasets" else "space"
+        parts = parts[1:]
+
+    if len(parts) < 5 or parts[2] not in {"resolve", "blob"}:
+        return None
+
+    tail = parts[3:]
+    if len(tail) >= 4 and tail[0] == "refs" and tail[1] in {"pr", "convert"}:
+        revision = "/".join(tail[:3])
+        filename_parts = tail[3:]
+    else:
+        revision = tail[0]
+        filename_parts = tail[1:]
+
+    if not revision or not filename_parts or any(part in {".", ".."} for part in filename_parts):
+        return None
+
+    return {
+        "repo_id": f"{parts[0]}/{parts[1]}",
+        "filename": "/".join(filename_parts),
+        "revision": revision,
+        "repo_type": repo_type,
+    }
+
+
+def native_huggingface_download(
+    url,
+    dest_path,
+    task_id,
+    should_cancel=None,
+    progress_callback=None,
+):
+    ref = parse_huggingface_file_url(url)
+    if not ref:
+        return False, "unrecognized Hugging Face file URL"
+
+    dest_path = Path(dest_path)
+    dest_path.parent.mkdir(parents=True, exist_ok=True)
+    stage_key = hashlib.sha256(url.encode("utf-8")).hexdigest()[:16]
+    stage_dir = dest_path.parent / f".{dest_path.name}.hf-stage-{stage_key}"
+    marker = stage_dir / ".comfy-model-manager-stage"
+    stage_dir.mkdir(parents=True, exist_ok=True)
+    if not marker.exists():
+        if any(stage_dir.iterdir()):
+            return False, f"unrecognized staging directory: {stage_dir}"
+        marker.write_text("native Hugging Face download staging\n", encoding="utf-8")
+
+    last_update = [0.0]
+
+    def report(downloaded, total):
+        if should_cancel and should_cancel():
+            raise HuggingFaceDownloadCancelled("cancelled")
+        now = time.time()
+        if total and downloaded < total and now - last_update[0] < PROGRESS_UPDATE_INTERVAL_SECONDS:
+            return
+        last_update[0] = now
+        pct = downloaded / total if total else 0
+        if progress_callback:
+            progress_callback(downloaded, total or 0, pct)
+        else:
+            update_progress(task_id, "running", pct, f"Downloading from Hugging Face: {int(pct * 100)}%")
+
+    class CallbackTqdm(hf_tqdm):
+        def __init__(self, *args, **kwargs):
+            kwargs["disable"] = False
+            super().__init__(*args, **kwargs)
+            report(int(self.n), int(self.total) if self.total is not None else None)
+
+        def display(self, msg=None, pos=None):
+            return None
+
+        def update(self, n=1):
+            result = super().update(n)
+            report(int(self.n), int(self.total) if self.total is not None else None)
+            return result
+
+    log(f"Downloading {dest_path.name} through native Hugging Face Xet")
+    try:
+        downloaded = Path(
+            hf_hub_download(
+                repo_id=ref["repo_id"],
+                filename=ref["filename"],
+                revision=ref["revision"],
+                repo_type=ref["repo_type"],
+                local_dir=stage_dir,
+                token=HF_API_KEY or None,
+                library_name="comfy-model-manager-bootstrapper",
+                library_version="0.1.0",
+                tqdm_class=CallbackTqdm,
+            )
+        )
+        if should_cancel and should_cancel():
+            raise HuggingFaceDownloadCancelled("cancelled")
+        if not downloaded.is_file():
+            raise RuntimeError(f"native Hugging Face download did not produce a file: {downloaded}")
+        final_size = downloaded.stat().st_size
+        # Finish all cancellable/error-producing reporting before committing
+        # the completed model into the caller's .part path.
+        report(final_size, final_size)
+        if should_cancel and should_cancel():
+            raise HuggingFaceDownloadCancelled("cancelled")
+        os.replace(downloaded, dest_path)
+        try:
+            if marker.is_file():
+                shutil.rmtree(stage_dir)
+        except OSError:
+            pass
+        return True, None
+    except HuggingFaceDownloadCancelled:
+        return False, "cancelled"
+    except Exception as e:
+        return False, str(e)
 
 def get_venv_python() -> Path:
     venv_path = COMFY_DIR / ".venv"
@@ -1192,6 +1334,19 @@ def download_from_source(
     progress_callback=None,
 ):
     sess = session or download_session
+
+    if parse_huggingface_file_url(url):
+        ok, err = native_huggingface_download(
+            url,
+            dest_path,
+            task_id,
+            should_cancel=should_cancel,
+            progress_callback=progress_callback,
+        )
+        if ok or err == "cancelled":
+            return ok, err
+        log(f"Native Hugging Face download unavailable, using HTTP fallback: {err}")
+
     attempt = 0
     while attempt < DOWNLOAD_MAX_RETRIES:
         if should_cancel and should_cancel():
@@ -1350,9 +1505,6 @@ def handle_download(task):
         url = src['url']
         provider = (src.get("provider") or get_provider_from_url(url)).lower()
         requires_auth = bool(src.get("requires_auth", False))
-        if provider == "huggingface" and not HF_API_KEY:
-            log("Skipping Hugging Face source (no HF key provided).")
-            continue
         if provider == "civitai" and not CIVITAI_API_KEY:
             log("Skipping Civitai source (no Civitai key provided).")
             continue
@@ -1546,10 +1698,6 @@ def handle_download_urls(task):
                 update_item(item_key, "skipped", f"Skipping {item_key} (missing data)", done_delta=1)
                 continue
 
-            if provider == "huggingface" and not HF_API_KEY:
-                log(f"Skipping Hugging Face URL (no HF key provided): {relpath}")
-                update_item(item_key, "skipped", f"Skipped HF (no key): {relpath}", done_delta=1)
-                continue
             if provider == "civitai" and not CIVITAI_API_KEY:
                 log(f"Skipping Civitai URL (no Civitai key provided): {relpath}")
                 update_item(item_key, "skipped", f"Skipped Civitai (no key): {relpath}", done_delta=1)

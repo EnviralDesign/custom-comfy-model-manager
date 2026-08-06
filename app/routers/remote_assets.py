@@ -14,6 +14,25 @@ from app.utils.streaming import range_requests_response
 
 router = APIRouter()
 
+
+def _classify_source(url: str) -> tuple[Optional[str], str, bool]:
+    try:
+        host = urlparse(url).netloc.lower()
+    except Exception:
+        host = None
+    provider = "unknown"
+    requires_auth = False
+    if host:
+        if host in {"huggingface.co", "hf.co"} or host.endswith((".huggingface.co", ".hf.co")):
+            provider = "huggingface"
+            # Public Hub files do not require a token. Gated/private sources
+            # will return an authorization error if no optional token exists.
+            requires_auth = False
+        elif host == "civitai.com" or host.endswith(".civitai.com"):
+            provider = "civitai"
+            requires_auth = True
+    return host, provider, requires_auth
+
 class AssetSource(BaseModel):
     url: str
     type: str  # "web", "local", "lake"
@@ -45,26 +64,10 @@ async def resolve_asset(
     # 1. Base Resolution
     sources = []
     
-    def classify_source(url: str) -> tuple[Optional[str], str, bool]:
-        try:
-            host = urlparse(url).netloc.lower()
-        except Exception:
-            host = None
-        provider = "unknown"
-        requires_auth = False
-        if host:
-            if host.endswith("huggingface.co") or host.endswith("hf.co"):
-                provider = "huggingface"
-                requires_auth = True
-            elif host.endswith("civitai.com"):
-                provider = "civitai"
-                requires_auth = True
-        return host, provider, requires_auth
-
     # 2. Check Web Source (Metadata)
     meta = await source_mgr.get_source(hash)
     if meta:
-        host, provider, requires_auth = classify_source(meta.url)
+        host, provider, requires_auth = _classify_source(meta.url)
         sources.append(AssetSource(
             url=meta.url,
             type="web",

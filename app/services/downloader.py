@@ -16,6 +16,11 @@ import requests
 
 from app.config import get_settings
 from app.database import get_db
+from app.services.huggingface_download import (
+    HuggingFaceDownloadCancelled,
+    download_huggingface_file,
+    parse_huggingface_file_url,
+)
 from app.services.source_manager import ModelSource, get_source_manager
 
 
@@ -66,9 +71,9 @@ def _parse_content_disposition(header_value: str) -> str | None:
 def _detect_provider(url: str) -> str:
     host = urlparse(url).hostname or ""
     host = host.lower()
-    if "civitai.com" in host:
+    if host == "civitai.com" or host.endswith(".civitai.com"):
         return "civitai"
-    if "huggingface.co" in host or host.endswith("hf.co"):
+    if host in {"huggingface.co", "hf.co"} or host.endswith((".huggingface.co", ".hf.co")):
         return "huggingface"
     return "generic"
 
@@ -386,9 +391,9 @@ class DownloadManager:
     def _resolve_auth_header(self, job: DownloadJob) -> dict[str, str]:
         settings = get_settings()
         if job.provider == "civitai":
-            token = settings.civitai_api_key
+            token = settings.civitai_api_key if _detect_provider(job.url) == "civitai" else None
         elif job.provider == "huggingface":
-            token = settings.huggingface_api_key
+            token = settings.huggingface_api_key if _detect_provider(job.url) == "huggingface" else None
         else:
             token = None
 
@@ -464,6 +469,64 @@ class DownloadManager:
             except Exception:
                 pass
 
+    def _run_native_huggingface_job(self, job: DownloadJob) -> bool:
+        if job.provider != "huggingface" or parse_huggingface_file_url(job.url) is None:
+            return False
+        if not job.dest_path:
+            raise RuntimeError("missing destination path")
+
+        settings = get_settings()
+        job.attempts += 1
+        job.updated_at = _now_iso()
+        job.status = "running"
+        job.error_message = None
+        self._persist_job_sync(job)
+
+        def report_progress(downloaded: int, total: int | None) -> None:
+            job.bytes_downloaded = downloaded
+            job.total_bytes = total
+            job.updated_at = _now_iso()
+            now_ts = time.time()
+            if now_ts - job.last_persist_ts > 1.0:
+                job.last_persist_ts = now_ts
+                self._persist_job_sync(job)
+
+        try:
+            download_huggingface_file(
+                job.url,
+                job.dest_path,
+                token=settings.huggingface_api_key,
+                progress_callback=report_progress,
+                should_cancel=lambda: job.cancelled,
+            )
+        except HuggingFaceDownloadCancelled:
+            job.status = "cancelled"
+            job.error_message = None
+            job.updated_at = _now_iso()
+            self._persist_job_sync(job)
+            return True
+        except Exception as exc:
+            # Preserve compatibility for unusual HF URLs or temporary Xet
+            # failures by allowing the existing resumable HTTP path to try.
+            job.error_message = f"native_hf_fallback: {exc}"
+            job.updated_at = _now_iso()
+            self._persist_job_sync(job)
+            return False
+
+        if job.temp_path and job.temp_path.exists():
+            try:
+                job.temp_path.unlink()
+            except OSError:
+                pass
+        job.bytes_downloaded = job.dest_path.stat().st_size
+        job.total_bytes = job.bytes_downloaded
+        job.status = "completed"
+        job.error_message = None
+        job.updated_at = _now_iso()
+        self._persist_job_sync(job)
+        self._post_complete(job)
+        return True
+
     def _run_job(self, job_id: int) -> None:
         job = self.get_job(job_id)
         if not job:
@@ -474,6 +537,8 @@ class DownloadManager:
         stall_timeout = max(1, int(settings.downloader_stall_timeout_seconds))
 
         try:
+            if self._run_native_huggingface_job(job):
+                return
             while not job.cancelled:
                 job.attempts += 1
                 job.updated_at = _now_iso()

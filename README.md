@@ -57,6 +57,10 @@ HUGGINGFACE_API_KEY=
 XAI_API_KEY=
 ```
 
+Public Hugging Face files do not require a token. Recognizable Hub file URLs are
+downloaded with the native `huggingface_hub`/`hf-xet` client; the token is only
+used for gated or private repositories.
+
 When using the remote bootstrapper, keep `API_KEY = "PASTE_KEY_HERE"` in
 `bootstrapper.py` to make it prompt for the temporary session key. After the
 agent registers, it fetches `CIVITAI_API_KEY` and `HUGGINGFACE_API_KEY` from the
@@ -116,6 +120,7 @@ EXTRA_PIP_PACKAGES=sageattention triton
 OPTIONAL_PIP_PACKAGES=flash-attn
 LOCAL_DOWNLOAD_WORKERS=1      # parallel local files; keep 1 for max per-file clarity
 HF_DOWNLOAD_WORKERS=1         # parallel Hugging Face files; keep 1 for max per-file clarity
+HF_XET_HIGH_PERFORMANCE=1     # maximize native HF Xet concurrency and buffers
 CIVITAI_DOWNLOAD_WORKERS=1    # parallel Civitai files; keep 1 for max per-file clarity
 OTHER_DOWNLOAD_WORKERS=1      # parallel generic URL files; keep 1 for max per-file clarity
 ```
@@ -125,6 +130,11 @@ provider sequential internally. For large files from sources that support HTTP
 Range, each active file downloads multiple byte ranges concurrently and assembles
 locally. Raise per-provider worker counts only when you want multiple active
 files from the same provider.
+
+Hugging Face repository file URLs take a separate native Xet fast path before
+the generic range downloader. High-performance mode is enabled by default for
+high-memory, high-bandwidth machines and can be disabled with
+`HF_XET_HIGH_PERFORMANCE=0`.
 
 On Lightning, the bootstrapper defaults `UV_LINK_MODE=copy` and
 `PYTHONNOUSERSITE=1` so uv installs real files into the workspace venv and avoids

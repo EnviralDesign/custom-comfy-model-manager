@@ -198,8 +198,9 @@ def hf_resolve(
     api_key: str | None,
 ) -> dict[str, Any]:
     revision = revision or "main"
+    safe_revision = quote(revision, safe="")
     safe_file = quote(file_name, safe="/")
-    url = f"https://huggingface.co/{repo_id}/resolve/{revision}/{safe_file}"
+    url = f"https://huggingface.co/{repo_id}/resolve/{safe_revision}/{safe_file}"
     if validate:
         validation = check_url_sync(url)
         return {"url": url, "validation": validation}

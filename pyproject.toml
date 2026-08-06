@@ -16,6 +16,8 @@ dependencies = [
     "pydantic>=2.5.0",
     "pydantic-settings>=2.1.0",
     "requests",
+    "huggingface_hub>=0.32.0",
+    "hf-xet",
 ]
 
 [project.optional-dependencies]

@@ -52,6 +52,7 @@ class Settings(BaseSettings):
 
     # Hugging Face API
     huggingface_api_key: str | None = None
+    huggingface_xet_high_performance: bool = True
     
     # App data directory
     app_data_dir: Path | None = None

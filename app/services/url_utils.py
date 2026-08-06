@@ -38,9 +38,12 @@ def check_url_sync(url: str) -> dict:
         }
         settings = get_settings()
         host = (urlparse(url).hostname or "").lower()
-        if host.endswith("civitai.com") and settings.civitai_api_key:
+        if (host == "civitai.com" or host.endswith(".civitai.com")) and settings.civitai_api_key:
             headers["Authorization"] = f"Bearer {settings.civitai_api_key}"
-        elif (host.endswith("huggingface.co") or host.endswith("hf.co")) and settings.huggingface_api_key:
+        elif (
+            host in {"huggingface.co", "hf.co"}
+            or host.endswith((".huggingface.co", ".hf.co"))
+        ) and settings.huggingface_api_key:
             headers["Authorization"] = f"Bearer {settings.huggingface_api_key}"
 
         response = requests.head(url, allow_redirects=True, timeout=10, headers=headers)
