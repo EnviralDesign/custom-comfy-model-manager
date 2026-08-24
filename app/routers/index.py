@@ -6,9 +6,13 @@ from typing import Literal
 from datetime import datetime
 from pathlib import Path
 import json
+import asyncio
 
 from app.services.indexer import IndexerService
 from app.services.differ import compute_diff, DiffEntry
+from app.services.queue_paths import UnsafeQueuePath
+from app.services.remote import get_session_manager
+from app.schemas.remote_task import RemoteTaskCreate
 from app.services.safetensors import (
     read_safetensors_header,
     SafetensorsHeaderError,
@@ -48,6 +52,28 @@ class FileEntry(BaseModel):
     mtime_ns: int
     hash: str | None
     side: str
+
+
+class FolderPathsResponse(BaseModel):
+    """All known folder paths on each storage side, including empty folders."""
+
+    local: list[str]
+    lake: list[str]
+
+
+class CreateFolderRequest(BaseModel):
+    """A single child folder to create beneath a Sync folder."""
+
+    parent: str = ""
+    name: str
+
+
+class CreateFolderResponse(BaseModel):
+    relpath: str
+    local_created: bool
+    lake_created: bool
+    remote_status: Literal["queued", "not_connected", "failed"]
+    remote_task_id: str | None = None
 
 
 @router.post("/refresh", response_model=list[RefreshResponse])
@@ -101,6 +127,55 @@ async def get_folders(
     indexer = IndexerService()
     folders = await indexer.get_folders(side, parent=parent)
     return {"folders": folders}
+
+
+@router.post("/folders", response_model=CreateFolderResponse)
+async def create_folder(request: CreateFolderRequest):
+    """Create a subfolder on Local and Lake, then queue it for Remote when connected."""
+    indexer = IndexerService()
+    try:
+        created = await indexer.create_folder(request.parent, request.name)
+    except (UnsafeQueuePath, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except FileExistsError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    remote_status: Literal["queued", "not_connected", "failed"] = "not_connected"
+    remote_task_id = None
+    session = get_session_manager()
+    status = session.get_status()
+    if status["is_active"] and status["agent_connected"]:
+        try:
+            remote_task = session.enqueue_task(
+                RemoteTaskCreate(
+                    type="CREATE_MODELS_FOLDER",
+                    payload={"relpath": created["relpath"]},
+                ),
+                label=f"Create models folder: {created['relpath']}",
+            )
+            remote_status = "queued"
+            remote_task_id = remote_task.id
+        except ValueError:
+            remote_status = "failed"
+
+    return {
+        **created,
+        "remote_status": remote_status,
+        "remote_task_id": remote_task_id,
+    }
+
+
+@router.get("/folder-paths", response_model=FolderPathsResponse)
+async def get_folder_paths():
+    """Return every scanned folder path so Sync can render empty destinations."""
+    indexer = IndexerService()
+    local, lake = await asyncio.gather(
+        indexer.get_folder_paths("local"),
+        indexer.get_folder_paths("lake"),
+    )
+    return {"local": local, "lake": lake}
 
 
 @router.get("/diff", response_model=list[DiffEntry])

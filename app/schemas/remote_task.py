@@ -16,6 +16,7 @@ TaskType = Literal[
     "INSTALL_COMFYUI_MANAGER",
     "ENABLE_NATIVE_MANAGER",
     "INSTALL_CUSTOM_NODES",
+    "CREATE_MODELS_FOLDER",
 ]
 
 class RemoteTaskBase(BaseModel):

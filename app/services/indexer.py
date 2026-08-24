@@ -7,6 +7,7 @@ from typing import Literal
 
 from app.config import get_settings
 from app.database import get_db
+from app.services.queue_paths import UnsafeQueuePath, normalize_queue_relpath, resolve_queue_path
 
 
 class IndexerService:
@@ -27,9 +28,24 @@ class IndexerService:
         root = self._get_root(side)
         now = datetime.now(timezone.utc).isoformat()
         
-        # Collect all files
+        # Collect files and directories in one walk. Directories are indexed too
+        # so the Sync view can offer an empty folder as a download destination.
         files_data = []
-        for dirpath, _, filenames in os.walk(root):
+        folders_data = []
+        for dirpath, dirnames, filenames in os.walk(root):
+            for dirname in dirnames:
+                folderpath = Path(dirpath) / dirname
+                try:
+                    relpath = str(folderpath.relative_to(root)).replace("\\", "/")
+                    folders_data.append({
+                        "side": side,
+                        "relpath": relpath,
+                        "indexed_at": now,
+                    })
+                except (OSError, ValueError):
+                    # Skip directories we cannot safely represent relative to root.
+                    continue
+
             for filename in filenames:
                 filepath = Path(dirpath) / filename
                 try:
@@ -77,11 +93,17 @@ class IndexerService:
                     f["side"], f["relpath"], f["size"], f["mtime_ns"], 
                     None, None, f["indexed_at"]
                 ))
+
+        folder_values = [
+            (folder["side"], folder["relpath"], folder["indexed_at"])
+            for folder in folders_data
+        ]
         
         # Update DB in a single valid transaction
         async with get_db() as db:
             # Clear old entries for this side
             await db.execute("DELETE FROM file_index WHERE side = ?", (side,))
+            await db.execute("DELETE FROM folder_index WHERE side = ?", (side,))
             
             # Batch insert
             await db.executemany(
@@ -90,6 +112,13 @@ class IndexerService:
                 VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
                 insert_values
+            )
+            await db.executemany(
+                """
+                INSERT INTO folder_index (side, relpath, indexed_at)
+                VALUES (?, ?, ?)
+                """,
+                folder_values,
             )
             await db.commit()
         
@@ -142,7 +171,7 @@ class IndexerService:
         side: Literal["local", "lake"],
         parent: str = "",
     ) -> list[str]:
-        """Get immediate subfolders under a parent folder."""
+        """Get immediate subfolders under a parent folder, including empty ones."""
         async with get_db() as db:
             if parent:
                 parent = parent.replace("\\", "/").strip("/")
@@ -150,9 +179,10 @@ class IndexerService:
             else:
                 prefix = ""
             
-            # Get all relpaths and extract folder structure
+            # Folder rows are collected during scanning, so directories with no
+            # files are still available to callers.
             cursor = await db.execute(
-                "SELECT DISTINCT relpath FROM file_index WHERE side = ?",
+                "SELECT relpath FROM folder_index WHERE side = ?",
                 (side,)
             )
             rows = await cursor.fetchall()
@@ -165,12 +195,80 @@ class IndexerService:
                 
                 # Get the path after the prefix
                 suffix = relpath[len(prefix):]
-                # Get the first component (immediate subfolder)
-                if "/" in suffix:
+                # Get the first component (immediate subfolder).
+                if suffix:
                     folder_name = suffix.split("/")[0]
                     folders.add(folder_name)
             
             return sorted(folders)
+
+    async def get_folder_paths(self, side: Literal["local", "lake"]) -> list[str]:
+        """Return every discovered folder path for a side, including empty folders."""
+        async with get_db() as db:
+            cursor = await db.execute(
+                "SELECT relpath FROM folder_index WHERE side = ? ORDER BY relpath",
+                (side,),
+            )
+            rows = await cursor.fetchall()
+            return [row["relpath"] for row in rows]
+
+    async def create_folder(self, parent: str, name: str) -> dict:
+        """Create one child folder on Local and Lake, then update the folder index."""
+        folder_name = str(name or "").strip()
+        if (
+            not folder_name
+            or folder_name in {".", ".."}
+            or "\x00" in folder_name
+            or "/" in folder_name
+            or "\\" in folder_name
+        ):
+            raise ValueError("Folder name must be a single, non-empty path component")
+
+        normalized_parent = normalize_queue_relpath(parent) if parent else ""
+        relpath = f"{normalized_parent}/{folder_name}" if normalized_parent else folder_name
+
+        targets: list[tuple[Literal["local", "lake"], Path]] = []
+        for side in ("local", "lake"):
+            target, _ = resolve_queue_path(self._get_root(side), relpath)
+            if target.exists() and not target.is_dir():
+                raise FileExistsError(f"Cannot create folder: {relpath} is already a file on {side.title()}")
+            targets.append((side, target))
+
+        created: dict[str, bool] = {}
+        try:
+            for side, target in targets:
+                already_exists = target.exists()
+                target.mkdir(parents=True, exist_ok=True)
+                created[side] = not already_exists
+        except OSError as exc:
+            completed = ", ".join(side.title() for side in created) or "neither side"
+            raise RuntimeError(
+                f"Folder creation stopped after {completed}; the remaining storage side could not be updated"
+            ) from exc
+
+        now = datetime.now(timezone.utc).isoformat()
+        path_parts = relpath.split("/")
+        folder_values = [
+            (side, "/".join(path_parts[:index]), now)
+            for side, _ in targets
+            for index in range(1, len(path_parts) + 1)
+        ]
+        async with get_db() as db:
+            await db.executemany(
+                """
+                INSERT INTO folder_index (side, relpath, indexed_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(side, relpath) DO UPDATE SET indexed_at = excluded.indexed_at
+                """,
+                folder_values,
+            )
+            await db.commit()
+
+        return {
+            "relpath": relpath,
+            "local_created": created["local"],
+            "lake_created": created["lake"],
+        }
     
     async def get_stats(self, side: Literal["local", "lake"]) -> dict:
         """Get statistics for a side."""

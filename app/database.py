@@ -28,6 +28,18 @@ CREATE INDEX IF NOT EXISTS idx_file_index_relpath ON file_index(relpath);
 CREATE INDEX IF NOT EXISTS idx_file_index_hash ON file_index(hash) WHERE hash IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_file_index_size ON file_index(size);
 
+-- Folder index cache: stores discovered directories, including empty folders
+CREATE TABLE IF NOT EXISTS folder_index (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    side TEXT NOT NULL CHECK (side IN ('local', 'lake')),
+    relpath TEXT NOT NULL,
+    indexed_at TEXT NOT NULL,
+    UNIQUE(side, relpath)
+);
+
+CREATE INDEX IF NOT EXISTS idx_folder_index_side ON folder_index(side);
+CREATE INDEX IF NOT EXISTS idx_folder_index_relpath ON folder_index(relpath);
+
 -- Queue: transfer and delete tasks
 CREATE TABLE IF NOT EXISTS queue (
     id INTEGER PRIMARY KEY AUTOINCREMENT,

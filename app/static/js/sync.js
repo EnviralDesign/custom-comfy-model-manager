@@ -4,6 +4,7 @@
 
 const Sync = {
     diffData: [],      // Raw diff entries from API
+    folderData: { local: [], lake: [] }, // Physical folders, including empty ones
     treeData: null,    // Hierarchical tree structure
     expandedFolders: new Set(),
     selectedItems: new Set(),
@@ -12,6 +13,7 @@ const Sync = {
     bundles: [],             // List of bundle names for quick add
     activeSourceContext: null,
     activeFolderDownloadContext: null,
+    activeCreateFolderContext: null,
     confirmModal: null,
     confirmResolve: null,
     confirmElements: null,
@@ -284,11 +286,11 @@ const Sync = {
             // Refresh index first
             await App.api('POST', '/index/refresh', { side: 'both' });
 
-            // Get diff data
-            this.diffData = await App.api('GET', '/index/diff');
+            // Get file diff and physical folder paths. The latter preserves
+            // empty folders as download destinations in the tree.
+            await this.loadTreeData();
 
             // Build tree and render
-            this.treeData = this.buildTree(this.diffData);
             this.render();
 
             // Load stats
@@ -320,11 +322,10 @@ const Sync = {
             // Quick refresh of the index
             await App.api('POST', '/index/refresh', { side: 'both' });
 
-            // Get fresh diff data
-            this.diffData = await App.api('GET', '/index/diff');
+            // Get fresh file and folder data.
+            await this.loadTreeData();
 
             // Rebuild tree and re-render (preserves expandedFolders)
-            this.treeData = this.buildTree(this.diffData);
             this.render(document.getElementById('search-input')?.value || '');
 
             // Update stats
@@ -336,11 +337,40 @@ const Sync = {
         }
     },
 
+    async loadTreeData() {
+        const [diffData, folderData] = await Promise.all([
+            App.api('GET', '/index/diff'),
+            App.api('GET', '/index/folder-paths'),
+        ]);
+        this.diffData = diffData;
+        this.folderData = folderData || { local: [], lake: [] };
+        this.treeData = this.buildTree(this.diffData, this.folderData);
+    },
+
     /**
      * Build hierarchical tree from flat diff entries
      */
-    buildTree(entries) {
+    buildTree(entries, folderData = this.folderData) {
         const root = { name: '', children: {}, files: [] };
+
+        const getOrCreateFolder = (current, folderName) => {
+            if (!current.children[folderName]) {
+                current.children[folderName] = { name: folderName, children: {}, files: [] };
+            }
+            return current.children[folderName];
+        };
+
+        // Physical directories are indexed separately from files, allowing
+        // folders with no files to remain visible and targetable for downloads.
+        for (const side of ['local', 'lake']) {
+            for (const folderPath of folderData?.[side] || []) {
+                let current = root;
+                for (const folderName of String(folderPath).split('/').filter(Boolean)) {
+                    current = getOrCreateFolder(current, folderName);
+                    current[`${side}Directory`] = true;
+                }
+            }
+        }
 
         for (const entry of entries) {
             const parts = entry.relpath.split('/');
@@ -349,10 +379,7 @@ const Sync = {
             // Navigate/create folder path
             let current = root;
             for (const part of parts) {
-                if (!current.children[part]) {
-                    current.children[part] = { name: part, children: {}, files: [] };
-                }
-                current = current.children[part];
+                current = getOrCreateFolder(current, part);
             }
 
             // Add file to current folder
@@ -405,6 +432,8 @@ const Sync = {
             // Count items and derive status metrics for display
             const folderMetrics = this.getFolderMetrics(folder);
             const itemCount = folderMetrics.total;
+            const hasChildren = folder.files.length > 0 || Object.keys(folder.children).length > 0;
+            const isEmptyFolder = !hasChildren;
 
             // Get folder diff status
             const folderStatus = this.getFolderStatus(folder);
@@ -424,11 +453,17 @@ const Sync = {
             const hashComplete = folderMetrics.total > 0 && folderMetrics.hashed === folderMetrics.total;
             const linkComplete = folderMetrics.total > 0 && folderMetrics.linked === folderMetrics.total;
             const sizeLabel = folderMetrics.totalBytes > 0 ? App.formatBytes(folderMetrics.totalBytes) : '';
+            const localSizeLabel = folderMetrics.localFileCount > 0
+                ? App.formatBytes(folderMetrics.localBytes)
+                : '—';
+            const lakeSizeLabel = folderMetrics.lakeFileCount > 0
+                ? App.formatBytes(folderMetrics.lakeBytes)
+                : '—';
             const metricsHtml = folderMetrics.total > 0 || sizeLabel
                 ? `<span class="folder-metrics">
                         <span class="folder-metric ${hashComplete ? 'complete' : ''} ${emptyMetrics ? 'empty' : ''}" title="${emptyMetrics ? 'No files ≥ 5 MB' : 'Counts files ≥ 5 MB'}">hashed ${folderMetrics.hashed}/${folderMetrics.total}</span>
                         <span class="folder-metric ${linkComplete ? 'complete' : ''} ${emptyMetrics ? 'empty' : ''}" title="${emptyMetrics ? 'No files ≥ 5 MB' : 'Counts files ≥ 5 MB'}">linked ${folderMetrics.linked}/${folderMetrics.total}</span>
-                        ${sizeLabel ? `<span class="folder-metric" title="Total size across files">${sizeLabel}</span>` : ''}
+                        ${sizeLabel ? `<span class="folder-metric" title="Deduplicated logical size across Local and Lake">${sizeLabel}</span>` : ''}
                    </span>`
                 : '';
             const hashFolderBtn = folderHashStats.total > 0
@@ -441,9 +476,10 @@ const Sync = {
                 <div class="diff-row diff-row-folder ${folderQueueStatus ? 'queue-' + folderQueueStatus : ''}" data-path="${folderPath}" data-depth="${depth}">
                     <div class="diff-col diff-col-local">
                         <div class="left-group">
-                            ${this.config.local_allow_delete ? `<span class="btn-slot">${folderStatus.local !== 'absent' ? `<button class="btn-icon btn-delete" data-action="delete-folder" data-side="local" data-folder="${folderPath}" title="Delete all in folder from Local">🗑️</button>` : ''}</span>` : ''}
+                            ${this.config.local_allow_delete ? `<span class="btn-slot">${folderMetrics.localFileCount > 0 ? `<button class="btn-icon btn-delete" data-action="delete-folder" data-side="local" data-folder="${folderPath}" title="Delete all in folder from Local">🗑️</button>` : ''}</span>` : ''}
                             ${queueBadgeHtml}
                         </div>
+                        <span class="folder-side-size ${folderMetrics.localFileCount > 0 ? '' : 'is-empty'}" title="${folderMetrics.localFileCount > 0 ? 'Local storage used by this folder' : 'No files on Local'}">${localSizeLabel}</span>
                         <span class="btn-slot">
                             ${showSyncToLake ? `<button class="btn-icon btn-copy" data-action="sync-folder-to-lake" data-folder="${folderPath}" title="Copy ${folderStatus.onlyLocalCount || ''} to Lake →">→</button>` : ''}
                         </span>
@@ -451,25 +487,28 @@ const Sync = {
                     </div>
                     <div class="diff-col diff-col-path">
                         <span class="tree-indent" style="width: ${depth * 20}px"></span>
-                        <span class="folder-toggle ${isExpanded ? 'expanded' : ''}" data-folder="${folderPath}">
-                            ${isExpanded ? '▼' : '▶'}
-                        </span>
+                        ${hasChildren
+                            ? `<span class="folder-toggle ${isExpanded ? 'expanded' : ''}" data-folder="${folderPath}">${isExpanded ? '▼' : '▶'}</span>`
+                            : '<span class="folder-toggle is-empty" aria-hidden="true">▶</span>'}
                         <span class="folder-icon">📁</span>
                         <span class="folder-name">${folderName}</span>
+                        ${isEmptyFolder ? '<span class="folder-empty-state" title="Empty folder — ready for a download">empty</span>' : ''}
                         ${metricsHtml}
                         <div class="path-actions">
                             ${hashFolderBtn}
+                            <button class="btn-create-subfolder" data-action="create-subfolder" data-folder="${folderPath}" title="Create subfolder">⊕</button>
                             <button class="btn-folder-download" data-action="folder-download" data-folder="${folderPath}" title="Download into this folder">+</button>
-                            <button class="btn-ai-lookup" data-action="ai-lookup-folder" data-folder="${folderPath}" title="AI lookup source URLs for this folder">✨</button>
-                            <button class="btn-add-bundle" data-action="add-folder-to-bundle" data-folder="${folderPath}" title="Add all in folder to bundle">📦</button>
+                            ${isEmptyFolder ? '' : `<button class="btn-ai-lookup" data-action="ai-lookup-folder" data-folder="${folderPath}" title="AI lookup source URLs for this folder">✨</button>`}
+                            ${isEmptyFolder ? '' : `<button class="btn-add-bundle" data-action="add-folder-to-bundle" data-folder="${folderPath}" title="Add all in folder to bundle">📦</button>`}
                         </div>
                     </div>
                     <div class="diff-col diff-col-lake">
                         <span class="presence-bar ${folderStatus.lake}"></span>
+                        <span class="folder-side-size ${folderMetrics.lakeFileCount > 0 ? '' : 'is-empty'}" title="${folderMetrics.lakeFileCount > 0 ? 'Lake storage used by this folder' : 'No files on Lake'}">${lakeSizeLabel}</span>
                         <span class="btn-slot">
                             ${showSyncToLocal ? `<button class="btn-icon btn-copy" data-action="sync-folder-to-local" data-folder="${folderPath}" title="← Copy ${folderStatus.onlyLakeCount || ''} to Local">←</button>` : ''}
                         </span>
-                        ${this.config.lake_allow_delete && folderStatus.lake !== 'absent' ? `<button class="btn-icon btn-delete" data-action="delete-folder" data-side="lake" data-folder="${folderPath}" title="Delete all in folder from Lake">🗑️</button>` : ''}
+                        ${this.config.lake_allow_delete && folderMetrics.lakeFileCount > 0 ? `<button class="btn-icon btn-delete" data-action="delete-folder" data-side="lake" data-folder="${folderPath}" title="Delete all in folder from Lake">🗑️</button>` : ''}
                     </div>
                 </div>
             `;
@@ -566,7 +605,7 @@ const Sync = {
     },
 
     nodeHasLocalFiles(node) {
-        if (node.files.some(file => file.local_size !== null)) {
+        if (node.localDirectory || node.files.some(file => file.local_size !== null)) {
             return true;
         }
         return Object.values(node.children).some(child => this.nodeHasLocalFiles(child));
@@ -584,10 +623,22 @@ const Sync = {
         let total = 0;
         let hashed = 0;
         let linked = 0;
+        let localBytes = 0;
+        let lakeBytes = 0;
+        let localFileCount = 0;
+        let lakeFileCount = 0;
         let totalBytes = 0;
 
         const visit = (n) => {
             for (const file of n.files) {
+                if (typeof file.local_size === 'number' && file.local_size >= 0) {
+                    localBytes += file.local_size;
+                    localFileCount += 1;
+                }
+                if (typeof file.lake_size === 'number' && file.lake_size >= 0) {
+                    lakeBytes += file.lake_size;
+                    lakeFileCount += 1;
+                }
                 totalBytes += this.getEntrySize(file);
                 if (!this.isMetricFile(file)) continue;
                 total += 1;
@@ -604,7 +655,7 @@ const Sync = {
         };
         visit(node);
 
-        return { total, hashed, linked, totalBytes };
+        return { total, hashed, linked, totalBytes, localBytes, lakeBytes, localFileCount, lakeFileCount };
     },
 
     getFolderHashStats(node) {
@@ -759,11 +810,13 @@ const Sync = {
     },
 
     getFolderStatus(node) {
-        let hasLocal = false, missingLocal = false;
-        let hasLake = false, missingLake = false;
+        let hasLocal = false, missingLocal = false, hasLocalDirectory = false;
+        let hasLake = false, missingLake = false, hasLakeDirectory = false;
         let hasOnlyLocal = false, hasOnlyLake = false, hasProbableSame = false;
 
         const checkNode = (n) => {
+            if (n.localDirectory) hasLocalDirectory = true;
+            if (n.lakeDirectory) hasLakeDirectory = true;
             for (const file of n.files) {
                 if (file.local_size !== null) hasLocal = true;
                 else missingLocal = true;
@@ -781,17 +834,17 @@ const Sync = {
         };
         checkNode(node);
 
-        const getStatus = (has, missing) => {
-            if (!has) return 'absent';
+        const getStatus = (has, missing, hasDirectory) => {
+            if (!has && !hasDirectory) return 'absent';
             if (missing) return 'mixed';
             return 'present';
         };
 
         return {
-            local: getStatus(hasLocal, missingLocal),
-            lake: getStatus(hasLake, missingLake),
-            localIcon: hasLocal ? '●' : '○',
-            lakeIcon: hasLake ? '●' : '○',
+            local: getStatus(hasLocal, missingLocal, hasLocalDirectory),
+            lake: getStatus(hasLake, missingLake, hasLakeDirectory),
+            localIcon: hasLocal || hasLocalDirectory ? '●' : '○',
+            lakeIcon: hasLake || hasLakeDirectory ? '●' : '○',
             hasOnlyLocal,
             hasOnlyLake,
             hasProbableSame,
@@ -950,6 +1003,13 @@ const Sync = {
         if (target.dataset.action === 'ai-lookup-file') {
             const relpath = target.dataset.relpath;
             this.enqueueFileAiLookup(relpath, target);
+            return;
+        }
+
+        // Download to folder
+        if (target.dataset.action === 'create-subfolder') {
+            const folderPath = target.dataset.folder || '';
+            this.openCreateFolderModal(folderPath);
             return;
         }
 
@@ -1915,6 +1975,89 @@ const Sync = {
     },
 
     // ==================== Folder Download Modal ====================
+
+    openCreateFolderModal(parentPath) {
+        let modal = document.getElementById('create-folder-modal');
+        if (!modal) {
+            modal = document.createElement('div');
+            modal.id = 'create-folder-modal';
+            modal.className = 'modal-overlay';
+            modal.innerHTML = `
+                <div class="modal-content">
+                    <div class="modal-header">
+                        <h3>⊕ Create Subfolder</h3>
+                        <button class="modal-close" type="button" aria-label="Close" onclick="Sync.closeCreateFolderModal()">×</button>
+                    </div>
+                    <div class="modal-body">
+                        <p class="modal-folder-path create-folder-parent"></p>
+                        <label for="create-folder-name">Folder name</label>
+                        <input type="text" id="create-folder-name" class="modal-input" autocomplete="off" maxlength="120" placeholder="e.g. wan_vace" />
+                        <p class="modal-hint">Creates the folder on Local and Lake now. A connected Remote agent receives the same models folder next.</p>
+                    </div>
+                    <div class="modal-footer">
+                        <button class="btn" type="button" data-action="create-folder-cancel">Cancel</button>
+                        <button class="btn btn-primary" type="button" data-action="create-folder-submit">Create folder</button>
+                    </div>
+                </div>
+            `;
+            document.body.appendChild(modal);
+
+            modal.addEventListener('click', (event) => {
+                if (event.target === modal) this.closeCreateFolderModal();
+            });
+            modal.querySelector('[data-action="create-folder-cancel"]').onclick = () => this.closeCreateFolderModal();
+            modal.querySelector('[data-action="create-folder-submit"]').onclick = () => this.createSubfolder();
+            modal.querySelector('#create-folder-name').addEventListener('keydown', (event) => {
+                if (event.key === 'Enter') this.createSubfolder();
+            });
+        }
+
+        this.activeCreateFolderContext = { parentPath };
+        modal.querySelector('.create-folder-parent').textContent = `Parent: ${parentPath || '(models root)'}`;
+        modal.querySelector('#create-folder-name').value = '';
+        modal.querySelector('[data-action="create-folder-submit"]').disabled = false;
+        modal.classList.add('visible');
+        modal.querySelector('#create-folder-name').focus();
+    },
+
+    closeCreateFolderModal() {
+        const modal = document.getElementById('create-folder-modal');
+        if (modal) modal.classList.remove('visible');
+        this.activeCreateFolderContext = null;
+    },
+
+    async createSubfolder() {
+        const context = this.activeCreateFolderContext;
+        const modal = document.getElementById('create-folder-modal');
+        const input = modal?.querySelector('#create-folder-name');
+        const submit = modal?.querySelector('[data-action="create-folder-submit"]');
+        const name = input?.value.trim() || '';
+        if (!context || !input) return;
+        if (!name) {
+            input.focus();
+            return;
+        }
+
+        submit.disabled = true;
+        try {
+            const result = await App.api('POST', '/index/folders', {
+                parent: context.parentPath,
+                name,
+            });
+            this.expandedFolders.add(context.parentPath);
+            this.expandedFolders.add(result.relpath);
+            await this.loadTreeData();
+            this.render(document.getElementById('search-input')?.value || '');
+            this.closeCreateFolderModal();
+
+            if (result.remote_status === 'failed') {
+                alert('The folder was created on Local and Lake, but could not be queued for Remote.');
+            }
+        } catch (err) {
+            alert('Failed to create subfolder: ' + err.message);
+            submit.disabled = false;
+        }
+    },
 
     openFolderDownloadModal(folderPath) {
         let modal = document.getElementById('folder-download-modal');

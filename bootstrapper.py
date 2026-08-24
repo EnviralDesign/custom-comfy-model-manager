@@ -1549,6 +1549,23 @@ def handle_download(task):
         log("All sources failed.", error=True)
         update_progress(task['id'], "failed", 0.0, "All sources failed")
 
+def handle_create_models_folder(task):
+    """Create an empty models folder requested from the Sync view."""
+    if not ensure_comfy_dir(task['id']):
+        return
+
+    relpath = task.get('payload', {}).get('relpath')
+    try:
+        target = get_asset_destination("models", relpath)
+        models_root = MODELS_DIR.resolve()
+        target.resolve().relative_to(models_root)
+        target.mkdir(parents=True, exist_ok=True)
+    except (OSError, ValueError) as exc:
+        update_progress(task['id'], "failed", 0.0, "Failed to create models folder", error=str(exc))
+        return
+
+    update_progress(task['id'], "completed", 1.0, f"Models folder ready: {relpath}")
+
 def handle_download_urls(task):
     payload = task.get('payload', {})
     items = payload.get('items', [])
@@ -1891,6 +1908,8 @@ def main():
                         handle_download(task)
                     elif task['type'] == 'DOWNLOAD_URLS':
                         handle_download_urls(task)
+                    elif task['type'] == 'CREATE_MODELS_FOLDER':
+                        handle_create_models_folder(task)
                     elif task['type'] == 'PIP_INSTALL_TORCH':
                         handle_install_torch(task)
                     elif task['type'] == 'PIP_INSTALL_REQUIREMENTS':

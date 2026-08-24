@@ -10,6 +10,7 @@ const App = {
     downloadJobs: [],
     aiLookupJobs: [],
     downloadRefreshHandle: null,
+    queueResizeObserver: null,
 
     init() {
         this.connectWebSocket();
@@ -76,12 +77,91 @@ const App = {
     // Queue Panel
     setupQueuePanel() {
         const panel = document.getElementById('queue-panel');
-        const header = document.querySelector('.queue-header');
+        const toggle = document.getElementById('queue-toggle');
+        const resizeHandle = document.getElementById('queue-resize-handle');
 
-        if (header && panel) {
-            header.addEventListener('click', () => {
-                panel.classList.toggle('expanded');
+        if (panel && toggle) {
+            const setExpanded = (expanded) => {
+                panel.classList.toggle('expanded', expanded);
+                toggle.setAttribute('aria-expanded', String(expanded));
+                const icon = toggle.querySelector('.queue-toggle-icon');
+                if (icon) icon.textContent = expanded ? '▼' : '▲';
+                this.updateQueueScrollClearance(panel);
+            };
+
+            toggle.addEventListener('click', () => {
+                setExpanded(!panel.classList.contains('expanded'));
             });
+
+            const maxHeight = () => Math.max(44, Math.floor(window.innerHeight * 0.5));
+            const minHeight = () => Math.min(160, maxHeight());
+            const setHeight = (height, persist = false) => {
+                const clamped = Math.max(minHeight(), Math.min(maxHeight(), Math.round(height)));
+                panel.style.height = `${clamped}px`;
+                resizeHandle?.setAttribute('aria-valuemin', String(minHeight()));
+                resizeHandle?.setAttribute('aria-valuemax', String(maxHeight()));
+                resizeHandle?.setAttribute('aria-valuenow', String(clamped));
+                this.updateQueueScrollClearance(panel);
+                if (persist) {
+                    try {
+                        localStorage.setItem('comfy-model-manager.queue-height', String(clamped));
+                    } catch (_) {
+                        // Storage can be unavailable in private browser contexts.
+                    }
+                }
+            };
+
+            try {
+                const savedHeight = Number(localStorage.getItem('comfy-model-manager.queue-height'));
+                if (Number.isFinite(savedHeight) && savedHeight > 0) setHeight(savedHeight);
+            } catch (_) {
+                // Use the stylesheet default when storage is unavailable.
+            }
+
+            if (resizeHandle) {
+                resizeHandle.addEventListener('pointerdown', (event) => {
+                    if (!panel.classList.contains('expanded')) return;
+                    event.preventDefault();
+                    const startY = event.clientY;
+                    const startHeight = panel.getBoundingClientRect().height;
+                    resizeHandle.setPointerCapture?.(event.pointerId);
+
+                    const onMove = (moveEvent) => setHeight(startHeight + startY - moveEvent.clientY);
+                    const onEnd = () => {
+                        setHeight(panel.getBoundingClientRect().height, true);
+                        window.removeEventListener('pointermove', onMove);
+                        window.removeEventListener('pointerup', onEnd);
+                        window.removeEventListener('pointercancel', onEnd);
+                    };
+
+                    window.addEventListener('pointermove', onMove);
+                    window.addEventListener('pointerup', onEnd);
+                    window.addEventListener('pointercancel', onEnd);
+                });
+
+                resizeHandle.addEventListener('keydown', (event) => {
+                    if (!panel.classList.contains('expanded')) return;
+                    if (!['ArrowUp', 'ArrowDown', 'Home', 'End'].includes(event.key)) return;
+                    event.preventDefault();
+                    const current = panel.getBoundingClientRect().height;
+                    const next = event.key === 'ArrowUp'
+                        ? current + 24
+                        : event.key === 'ArrowDown'
+                                ? current - 24
+                                : event.key === 'Home'
+                                ? minHeight()
+                                : maxHeight();
+                    setHeight(next, true);
+                });
+            }
+
+            if (typeof ResizeObserver !== 'undefined') {
+                this.queueResizeObserver?.disconnect();
+                this.queueResizeObserver = new ResizeObserver(() => this.updateQueueScrollClearance(panel));
+                this.queueResizeObserver.observe(panel);
+            }
+            window.addEventListener('resize', () => setHeight(panel.getBoundingClientRect().height));
+            requestAnimationFrame(() => this.updateQueueScrollClearance(panel));
         }
 
         const haltBtn = document.getElementById('halt-all-btn');
@@ -103,6 +183,15 @@ const App = {
                 this.loadAiLookupJobs();
             }, 2000);
         }
+    },
+
+    updateQueueScrollClearance(panel = document.getElementById('queue-panel')) {
+        if (!panel) return;
+        const header = panel.querySelector('.queue-header');
+        const visibleHeight = panel.classList.contains('expanded')
+            ? panel.getBoundingClientRect().height
+            : header?.getBoundingClientRect().height || 44;
+        document.documentElement.style.setProperty('--queue-visible-height', `${Math.ceil(visibleHeight)}px`);
     },
 
     async cancelAllTasks() {

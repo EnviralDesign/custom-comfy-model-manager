@@ -66,8 +66,20 @@
 
     <!-- Queue Panel -->
     <div class="queue-panel" id="queue-panel">
+        <div
+            class="queue-resize-handle"
+            id="queue-resize-handle"
+            role="separator"
+            aria-label="Resize task queue"
+            aria-orientation="horizontal"
+            aria-valuemin="160"
+            tabindex="0"
+        ></div>
         <div class="queue-header">
-            <h3>📋 Task Queue</h3>
+            <button class="queue-toggle" id="queue-toggle" type="button" aria-expanded="false">
+                <span>📋 Task Queue</span>
+                <span class="queue-toggle-icon" aria-hidden="true">▲</span>
+            </button>
             <div class="queue-controls">
                 <button class="btn btn-small" id="pause-queue">⏸️</button>
                 <button class="btn btn-small" id="resume-queue">▶️</button>
