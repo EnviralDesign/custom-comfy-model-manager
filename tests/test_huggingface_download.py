@@ -123,6 +123,26 @@ def test_native_download_moves_staged_file_and_reports_progress(tmp_path, monkey
     assert not list(tmp_path.glob(".renamed.safetensors.hf-stage-*"))
 
 
+def test_xet_transfer_progress_reports_before_file_reconstruction():
+    progress = []
+    progress_bar = hf_download._progress_tqdm_class(
+        lambda downloaded, total: progress.append((downloaded, total)),
+        should_cancel=None,
+    )(total=10, initial=0)
+
+    try:
+        progress_bar.update_transfer(4)
+        assert progress[-1] == (4, 10)
+
+        progress_bar.update(2)
+        assert progress[-1] == (4, 10)
+
+        progress_bar.update_transfer(4)
+        assert progress[-1] == (8, 10)
+    finally:
+        progress_bar.close()
+
+
 def test_native_download_passes_optional_token(tmp_path, monkeypatch):
     seen_token = []
 

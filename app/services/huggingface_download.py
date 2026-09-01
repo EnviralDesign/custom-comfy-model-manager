@@ -91,6 +91,7 @@ def _progress_tqdm_class(
         def __init__(self, *args, **kwargs):
             kwargs["disable"] = False
             super().__init__(*args, **kwargs)
+            self._transferred_bytes = int(self.n)
             self._report_progress()
 
         def display(self, msg=None, pos=None) -> None:
@@ -102,12 +103,25 @@ def _progress_tqdm_class(
                 raise HuggingFaceDownloadCancelled("cancelled")
             if progress_callback:
                 total = int(self.total) if self.total is not None else None
-                progress_callback(int(self.n), total)
+                downloaded = max(int(self.n), self._transferred_bytes)
+                if total is not None:
+                    downloaded = min(downloaded, total)
+                progress_callback(downloaded, total)
 
         def update(self, n=1):
             result = super().update(n)
             self._report_progress()
             return result
+
+        def update_transfer(self, n=1) -> None:
+            """Receive Xet's network-transfer progress before file reconstruction."""
+            self._transferred_bytes += max(0, int(n or 0))
+            self._report_progress()
+
+        def set_transfer_postfix_str(self, postfix, refresh=False) -> None:
+            # The UI reports byte counts directly, so Xet's terminal-only rate
+            # label is intentionally ignored.
+            return None
 
     return CallbackTqdm
 

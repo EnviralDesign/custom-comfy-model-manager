@@ -10,6 +10,7 @@ const App = {
     downloadJobs: [],
     aiLookupJobs: [],
     downloadRefreshHandle: null,
+    aiLookupRefreshHandle: null,
     queueResizeObserver: null,
 
     init() {
@@ -180,6 +181,11 @@ const App = {
         if (!this.downloadRefreshHandle) {
             this.downloadRefreshHandle = setInterval(() => {
                 this.loadDownloadJobs();
+            }, 500);
+        }
+
+        if (!this.aiLookupRefreshHandle) {
+            this.aiLookupRefreshHandle = setInterval(() => {
                 this.loadAiLookupJobs();
             }, 2000);
         }
