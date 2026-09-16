@@ -31,7 +31,7 @@ def _parse_content_disposition_filename(header_value: str | None) -> Optional[st
     return None
 
 
-def check_url_sync(url: str) -> dict:
+def _probe_url(url: str) -> dict:
     try:
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
@@ -73,6 +73,22 @@ def check_url_sync(url: str) -> dict:
         }
     except Exception as e:
         return {"ok": False, "error": str(e)}
+
+
+def check_url_sync(url: str) -> dict:
+    # Pasted Civitai model page URLs resolve to a direct file download first.
+    resolved: str | None = None
+    try:
+        from app.services.civitai_api import resolve_civitai_page_url
+
+        resolved = resolve_civitai_page_url(url)
+    except Exception:
+        resolved = None
+
+    result = _probe_url(resolved or url)
+    if resolved:
+        result["resolved_url"] = resolved
+    return result
 
 
 def url_basename(url: str) -> str:

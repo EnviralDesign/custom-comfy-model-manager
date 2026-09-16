@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 import re
 from typing import Any, Iterable
+from urllib.parse import parse_qs, urlparse
 
 import requests
 
@@ -87,11 +88,93 @@ class CivitaiClient:
             params["page"] = page
         return self._get("/api/v1/models", params=params)
 
+    def get_model(self, model_id: int) -> dict[str, Any] | None:
+        return self._get(f"/api/v1/models/{model_id}")
+
     def get_model_version(self, model_version_id: int) -> dict[str, Any] | None:
         return self._get(f"/api/v1/model-versions/{model_version_id}")
 
     def get_model_version_by_hash(self, file_hash: str) -> dict[str, Any] | None:
         return self._get(f"/api/v1/model-versions/by-hash/{file_hash}")
+
+
+def is_civitai_page_url(url: str) -> bool:
+    parsed = urlparse(url)
+    host = (parsed.hostname or "").lower()
+    if host != "civitai.com" and not host.endswith(".civitai.com"):
+        return False
+    return re.match(r"^/models/\d+(/.*)?$", parsed.path) is not None
+
+
+def pick_primary_file(candidates: list[CivitaiFileCandidate]) -> CivitaiFileCandidate | None:
+    if not candidates:
+        return None
+
+    def size_of(candidate: CivitaiFileCandidate) -> int:
+        try:
+            return int(candidate.metadata.get("size") or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    safetensors = [c for c in candidates if (c.file_name or "").lower().endswith(".safetensors")]
+    pool = safetensors or candidates
+    return max(pool, key=size_of)
+
+
+def resolve_civitai_page_url(
+    url: str,
+    *,
+    base_url: str | None = None,
+    api_key: str | None = None,
+) -> str | None:
+    """Resolve a pasted Civitai model page URL to a direct file download URL.
+
+    Handles URLs like:
+      https://civitai.com/models/1272455/hyperdetailed-illustration?modelVersionId=2718980
+      https://civitai.com/models/1272455
+    Returns None for non-Civitai URLs, non-page paths, or when resolution fails.
+    """
+    if not is_civitai_page_url(url):
+        return None
+
+    parsed = urlparse(url)
+    model_id = int(re.match(r"^/models/(\d+)", parsed.path).group(1))
+
+    version_id: int | None = None
+    qs = parse_qs(parsed.query)
+    raw_version = (qs.get("modelVersionId") or [None])[0]
+    if raw_version and str(raw_version).isdigit():
+        version_id = int(raw_version)
+
+    if base_url is None or api_key is None:
+        from app.config import get_settings
+
+        settings = get_settings()
+        base_url = base_url or settings.civitai_api_base_url
+        api_key = api_key or settings.civitai_api_key
+
+    client = CivitaiClient(base_url=base_url, api_key=api_key)
+
+    if version_id is not None:
+        payload = client.get_model_version(version_id)
+        if isinstance(payload, dict):
+            version = payload.get("modelVersion") or payload
+            best = pick_primary_file(list(_extract_file_candidates(payload.get("model"), version)))
+            if best:
+                return best.download_url
+        return None
+
+    payload = client.get_model(model_id)
+    if not isinstance(payload, dict):
+        return None
+    versions = payload.get("modelVersions") or []
+    for version in versions:
+        if not isinstance(version, dict) or not version.get("files"):
+            continue
+        best = pick_primary_file(list(_extract_file_candidates(payload, version)))
+        if best:
+            return best.download_url
+    return None
 
 
 def build_query_variants(filename: str) -> list[str]:

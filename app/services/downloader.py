@@ -327,6 +327,16 @@ class DownloadManager:
         if not provider or provider == "auto":
             provider = _detect_provider(url)
 
+        if provider == "civitai":
+            try:
+                from app.services.civitai_api import resolve_civitai_page_url
+
+                resolved = resolve_civitai_page_url(url)
+                if resolved and resolved != url:
+                    url = resolved
+            except Exception:
+                pass
+
         if not filename:
             filename = _url_basename(url) or f"download-{self._next_id}.bin"
 

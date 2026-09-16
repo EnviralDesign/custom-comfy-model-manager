@@ -367,7 +367,13 @@ const Bundles = {
             if (res.ok) {
                 resultDiv.style.color = 'var(--success)';
                 const sizeStr = res.size ? ` (${(res.size / (1024 * 1024)).toFixed(1)} MB)` : '';
-                resultDiv.innerHTML = `✅ Link OK! HTTP ${res.status}${sizeStr}`;
+                if (res.resolved_url && res.resolved_url !== url) {
+                    input.value = res.resolved_url;
+                    const name = res.filename || res.resolved_url.split('/').pop() || '';
+                    resultDiv.innerHTML = `✅ Resolved Civitai page to ${name}${sizeStr}`;
+                } else {
+                    resultDiv.innerHTML = `✅ Link OK! HTTP ${res.status}${sizeStr}`;
+                }
                 return res;
             }
             resultDiv.style.color = 'var(--danger)';
